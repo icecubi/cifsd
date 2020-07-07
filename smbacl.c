@@ -38,6 +38,97 @@ static const struct smb_sid sid_unix_NFS_mode = { 1, 2, {0, 0, 0, 0, 0, 5},
 	{cpu_to_le32(88),
 	 cpu_to_le32(3), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
 
+static const struct cred *root_cred;
+
+static int
+cifs_idmap_key_instantiate(struct key *key, struct key_preparsed_payload *prep)
+{
+	char *payload;
+
+	/*
+	 * If the payload is less than or equal to the size of a pointer, then
+	 * an allocation here is wasteful. Just copy the data directly to the
+	 * payload.value union member instead.
+	 *
+	 * With this however, you must check the datalen before trying to
+	 * dereference payload.data!
+	 */
+	if (prep->datalen <= sizeof(key->payload)) {
+		key->payload.data[0] = NULL;
+		memcpy(&key->payload, prep->data, prep->datalen);
+	} else {
+		payload = kmemdup(prep->data, prep->datalen, GFP_KERNEL);
+		if (!payload)
+			return -ENOMEM;
+		key->payload.data[0] = payload;
+	}
+
+	key->datalen = prep->datalen;
+	return 0;
+}
+
+static inline void
+cifs_idmap_key_destroy(struct key *key)
+{
+	if (key->datalen > sizeof(key->payload))
+		kfree(key->payload.data[0]);
+}
+
+static struct key_type cifs_idmap_key_type = {
+	.name        = "cifs.idmap",
+	.instantiate = cifs_idmap_key_instantiate,
+	.destroy     = cifs_idmap_key_destroy,
+	.describe    = user_describe,
+};
+
+static char *
+sid_to_key_str(struct cifs_sid *sidptr, unsigned int type)
+{
+	int i, len;
+	unsigned int saval;
+	char *sidstr, *strptr;
+	unsigned long long id_auth_val;
+
+	/* 3 bytes for prefix */
+	sidstr = kmalloc(3 + SID_STRING_BASE_SIZE +
+			 (SID_STRING_SUBAUTH_SIZE * sidptr->num_subauth),
+			 GFP_KERNEL);
+	if (!sidstr)
+		return sidstr;
+
+	strptr = sidstr;
+	len = sprintf(strptr, "%cs:S-%hhu", type == SIDOWNER ? 'o' : 'g',
+			sidptr->revision);
+	strptr += len;
+
+	/* The authority field is a single 48-bit number */
+	id_auth_val = (unsigned long long)sidptr->authority[5];
+	id_auth_val |= (unsigned long long)sidptr->authority[4] << 8;
+	id_auth_val |= (unsigned long long)sidptr->authority[3] << 16;
+	id_auth_val |= (unsigned long long)sidptr->authority[2] << 24;
+	id_auth_val |= (unsigned long long)sidptr->authority[1] << 32;
+	id_auth_val |= (unsigned long long)sidptr->authority[0] << 48;
+
+	/*
+	 * MS-DTYP states that if the authority is >= 2^32, then it should be
+	 * expressed as a hex value.
+	 */
+	if (id_auth_val <= UINT_MAX)
+		len = sprintf(strptr, "-%llu", id_auth_val);
+	else
+		len = sprintf(strptr, "-0x%llx", id_auth_val);
+
+	strptr += len;
+
+	for (i = 0; i < sidptr->num_subauth; ++i) {
+		saval = le32_to_cpu(sidptr->sub_auth[i]);
+		len = sprintf(strptr, "-%u", saval);
+		strptr += len;
+	}
+
+	return sidstr;
+}
+
 /*
  * if the two SIDs (roughly equivalent to a UUID for a user or group) are
  * the same returns zero, if they do not match returns non-zero.
@@ -364,6 +455,160 @@ static int set_chmod_dacl(struct smb_acl *pndacl,
 	return 0;
 }
 
+static int parse_sid(struct cifs_sid *psid, char *end_of_acl)
+{
+	/* BB need to add parm so we can store the SID BB */
+
+	/* validate that we do not go past end of ACL - sid must be at least 8
+	 *            bytes long (assuming no sub-auths - e.g. the null SID */
+	if (end_of_acl < (char *)psid + 8) {
+		cifs_dbg(VFS, "ACL too small to parse SID %p\n", psid);
+		return -EINVAL;
+	}
+
+#ifdef CONFIG_CIFS_DEBUG2
+	if (psid->num_subauth) {
+		int i;
+		cifs_dbg(FYI, "SID revision %d num_auth %d\n",
+				psid->revision, psid->num_subauth);
+
+		for (i = 0; i < psid->num_subauth; i++) {
+			cifs_dbg(FYI, "SID sub_auth[%d]: 0x%x\n",
+					i, le32_to_cpu(psid->sub_auth[i]));
+		}
+
+		/* BB add length check to make sure that we do not have huge
+		 *                         num auths and therefore go off the end */
+		cifs_dbg(FYI, "RID 0x%x\n",
+				le32_to_cpu(psid->sub_auth[psid->num_subauth-1]));
+	}
+#endif
+
+	return 0;
+}
+
+static int
+sid_to_id(struct cifs_sid *psid,
+		struct cifs_fattr *fattr, uint sidtype)
+{
+	int rc = 0;
+	struct key *sidkey;
+	char *sidstr;
+	const struct cred *saved_cred;
+//	kuid_t fuid = cifs_sb->mnt_uid;
+//	kgid_t fgid = cifs_sb->mnt_gid;
+
+	/*
+	 * If we have too many subauthorities, then something is really wrong.
+	 * Just return an error.
+	 */
+	if (unlikely(psid->num_subauth > SID_MAX_SUB_AUTHORITIES)) {
+		cifs_dbg(FYI, "%s: %u subauthorities is too many!\n",
+			 __func__, psid->num_subauth);
+		return -EIO;
+	}
+
+#if 0
+	if (cifs_sb->mnt_cifs_flags & CIFS_MOUNT_UID_FROM_ACL) {
+		uint32_t unix_id;
+		bool is_group;
+
+		if (sidtype != SIDOWNER)
+			is_group = true;
+		else
+			is_group = false;
+
+		if (is_well_known_sid(psid, &unix_id, is_group) == false)
+			goto try_upcall_to_get_id;
+
+		if (is_group) {
+			kgid_t gid;
+			gid_t id;
+
+			id = (gid_t)unix_id;
+			gid = make_kgid(&init_user_ns, id);
+			if (gid_valid(gid)) {
+				fgid = gid;
+				goto got_valid_id;
+			}
+		} else {
+			kuid_t uid;
+			uid_t id;
+
+			id = (uid_t)unix_id;
+			uid = make_kuid(&init_user_ns, id);
+			if (uid_valid(uid)) {
+				fuid = uid;
+				goto got_valid_id;
+			}
+		}
+		/* If unable to find uid/gid easily from SID try via upcall */
+	}
+#endif
+
+try_upcall_to_get_id:
+	sidstr = sid_to_key_str(psid, sidtype);
+	if (!sidstr)
+		return -ENOMEM;
+
+	saved_cred = override_creds(root_cred);
+	sidkey = request_key(&cifs_idmap_key_type, sidstr, "");
+	if (IS_ERR(sidkey)) {
+		rc = -EINVAL;
+		cifs_dbg(FYI, "%s: Can't map SID %s to a %cid\n",
+			 __func__, sidstr, sidtype == SIDOWNER ? 'u' : 'g');
+		goto out_revert_creds;
+	}
+
+	/*
+	 * FIXME: Here we assume that uid_t and gid_t are same size. It's
+	 * probably a safe assumption but might be better to check based on
+	 * sidtype.
+	 */
+	BUILD_BUG_ON(sizeof(uid_t) != sizeof(gid_t));
+	if (sidkey->datalen != sizeof(uid_t)) {
+		rc = -EIO;
+		cifs_dbg(FYI, "%s: Downcall contained malformed key (datalen=%hu)\n",
+			 __func__, sidkey->datalen);
+		key_invalidate(sidkey);
+		goto out_key_put;
+	}
+
+	if (sidtype == SIDOWNER) {
+		kuid_t uid;
+		uid_t id;
+		memcpy(&id, &sidkey->payload.data[0], sizeof(uid_t));
+		uid = make_kuid(&init_user_ns, id);
+		if (uid_valid(uid))
+			fuid = uid;
+	} else {
+		kgid_t gid;
+		gid_t id;
+		memcpy(&id, &sidkey->payload.data[0], sizeof(gid_t));
+		gid = make_kgid(&init_user_ns, id);
+		if (gid_valid(gid))
+			fgid = gid;
+	}
+
+out_key_put:
+	key_put(sidkey);
+out_revert_creds:
+	revert_creds(saved_cred);
+	kfree(sidstr);
+
+	/*
+	 * Note that we return 0 here unconditionally. If the mapping
+	 * fails then we just fall back to using the mnt_uid/mnt_gid.
+	 */
+got_valid_id:
+	rc = 0;
+//	if (sidtype == SIDOWNER)
+//		fattr->cf_uid = fuid;
+//	else
+//		fattr->cf_gid = fgid;
+	return rc;
+}
+
 /* Convert CIFS ACL to POSIX form */
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr)
@@ -389,6 +634,31 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		 le32_to_cpu(pntsd->gsidoffset),
 		 le32_to_cpu(pntsd->sacloffset), dacloffset);
 
+	rc = parse_sid(owner_sid_ptr, end_of_acl);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Error %d parsing Owner SID\n", __func__, rc);
+		return rc;
+	}
+	rc = sid_to_id(cifs_sb, owner_sid_ptr, fattr, SIDOWNER);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Error %d mapping Owner SID to uid\n",
+				__func__, rc);
+		return rc;
+	}
+
+	rc = parse_sid(group_sid_ptr, end_of_acl);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Error %d mapping Owner SID to gid\n",
+				__func__, rc);
+		return rc;
+	}
+	rc = sid_to_id(cifs_sb, group_sid_ptr, fattr, SIDGROUP);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Error %d mapping Group SID to gid\n",
+				__func__, rc);
+		return rc;
+	}
+
 	if (dacloffset)
 		parse_dacl(dacl_ptr, end_of_acl, owner_sid_ptr, group_sid_ptr,
 			fattr);
@@ -396,6 +666,64 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		ksmbd_err("no ACL\n"); /* BB grant all or default perms? */
 
 	return rc;
+}
+
+static int
+id_to_sid(unsigned int cid, uint sidtype, struct cifs_sid *ssid)
+{
+	int rc;
+	struct key *sidkey;
+	struct cifs_sid *ksid;
+	unsigned int ksid_size;
+	char desc[3 + 10 + 1]; /* 3 byte prefix + 10 bytes for value + NULL */
+	const struct cred *saved_cred;
+
+	rc = snprintf(desc, sizeof(desc), "%ci:%u",
+			sidtype == SIDOWNER ? 'o' : 'g', cid);
+	if (rc >= sizeof(desc))
+		return -EINVAL;
+
+	rc = 0;
+	saved_cred = override_creds(root_cred);
+	sidkey = request_key(&cifs_idmap_key_type, desc, "");
+	if (IS_ERR(sidkey)) {
+		rc = -EINVAL;
+		cifs_dbg(FYI, "%s: Can't map %cid %u to a SID\n",
+				__func__, sidtype == SIDOWNER ? 'u' : 'g', cid);
+		goto out_revert_creds;
+	} else if (sidkey->datalen < CIFS_SID_BASE_SIZE) {
+		rc = -EIO;
+		cifs_dbg(FYI, "%s: Downcall contained malformed key (datalen=%hu)\n",
+				__func__, sidkey->datalen);
+		goto invalidate_key;
+	}
+
+	/*
+	 * A sid is usually too large to be embedded in payload.value, but if
+	 * there are no subauthorities and the host has 8-byte pointers, then
+	 */
+	ksid = sidkey->datalen <= sizeof(sidkey->payload) ?
+		(struct cifs_sid *)&sidkey->payload :
+		(struct cifs_sid *)sidkey->payload.data[0];
+
+	ksid_size = CIFS_SID_BASE_SIZE + (ksid->num_subauth * sizeof(__le32));
+	if (ksid_size > sidkey->datalen) {
+		rc = -EIO;
+		cifs_dbg(FYI, "%s: Downcall contained malformed key (datalen=%hu, ksid_size=%u)\n",
+				__func__, sidkey->datalen, ksid_size);
+		goto invalidate_key;
+	}
+
+	cifs_copy_sid(ssid, ksid);
+out_key_put:
+	key_put(sidkey);
+out_revert_creds:
+	revert_creds(saved_cred);
+	return rc;
+
+invalidate_key:
+	key_invalidate(sidkey);
+	goto out_key_put;
 }
 
 /* Convert permission bits from mode to equivalent CIFS ACL */
@@ -406,6 +734,38 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen, umode_t nmode)
 	__u32 sidsoffset;
 	struct smb_sid *owner_sid_ptr, *group_sid_ptr;
 	struct smb_acl *dacl_ptr = NULL; /* no need for SACL ptr */
+
+	nowner_sid_ptr = kmalloc(sizeof(struct cifs_sid), GFP_KERNEL);
+	if (!nowner_sid_ptr)
+		return -ENOMEM;
+
+	rc = id_to_sid(id, SIDOWNER, nowner_sid_ptr);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Mapping error %d for owner id %d\n",
+				__func__, rc, id);
+		kfree(nowner_sid_ptr);
+		return rc;
+	}
+
+	ngroup_sid_ptr = kmalloc(sizeof(struct cifs_sid), GFP_KERNEL);
+	if (!ngroup_sid_ptr)
+		return -ENOMEM;
+
+	rc = id_to_sid(id, SIDGROUP, ngroup_sid_ptr);
+	if (rc) {
+		cifs_dbg(FYI, "%s: Mapping error %d for group id %d\n",
+				__func__, rc, id);
+		kfree(ngroup_sid_ptr);
+		return rc;
+	}
+
+	owner_sid_ptr = (struct smb_sid *)((char *)pntsd + sidsoffset);
+	smb_copy_sid(owner_sid_ptr, &nowner_sid_ptr);
+
+	/* copy group sid */
+	group_sid_ptr = (struct smb_sid *)((char *)pntsd + sidsoffset +
+					sizeof(struct smb_sid));
+	smb_copy_sid(group_sid_ptr, &ngroup_sid_ptr);
 
 	dacloffset = sizeof(struct smb_ntsd);
 	dacl_ptr = (struct smb_acl *)((char *)pntsd + dacloffset);
@@ -423,14 +783,6 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen, umode_t nmode)
 	pntsd->sacloffset = 0;
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
-
-	owner_sid_ptr = (struct smb_sid *)((char *)pntsd + sidsoffset);
-	smb_copy_sid(owner_sid_ptr, &sid_unix_NFS_users);
-
-	/* copy group sid */
-	group_sid_ptr = (struct smb_sid *)((char *)pntsd + sidsoffset +
-					sizeof(struct smb_sid));
-	smb_copy_sid(group_sid_ptr, &sid_unix_NFS_groups);
 
 	*secdesclen = le32_to_cpu(pntsd->gsidoffset) + sizeof(struct smb_sid);
 	return rc;
