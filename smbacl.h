@@ -60,6 +60,25 @@
 #define SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE 0x12
 #define SYSTEM_SCOPED_POLICY_ID_ACE_TYPE 0x13
 
+
+/*
+ * Maximum size of a string representation of a SID:
+ *   
+ * The fields are unsigned values in decimal. So:
+ *    
+ * u8:  max 3 bytes in decimal
+ * u32: max 10 bytes in decimal
+ *        
+ * "S-" + 3 bytes for version field + 15 for authority field + NULL terminator
+ *        
+ * For authority field, max is when all 6 values are non-zero and it must be
+ * represented in hex. So "-0x" + 12 hex digits.
+ *            
+ * Add 11 bytes for each subauthority field (10 bytes each + 1 for '-')
+ */
+#define SID_STRING_BASE_SIZE (2 + 3 + 15 + 1)
+#define SID_STRING_SUBAUTH_SIZE (11) /* size of a single subauth string */
+
 struct smb_ntsd {
 	__le16 revision; /* revision level */
 	__le16 type;
@@ -75,6 +94,9 @@ struct smb_sid {
 	__u8 authority[NUM_AUTHS];
 	__le32 sub_auth[SID_MAX_SUB_AUTHORITIES]; /* sub_auth[num_subauth] */
 } __packed;
+
+/* size of a struct cifs_sid, sans sub_auth array */
+#define CIFS_SID_BASE_SIZE (1 + 1 + NUM_AUTHS)
 
 struct smb_acl {
 	__le16 revision; /* revision level */
@@ -98,6 +120,7 @@ struct smb_fattr {
 
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr);
-int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen, umode_t mode);
+int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
+		struct smb_fattr *fattr);
 
 #endif /* _SMBACL_H */

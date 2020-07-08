@@ -4760,11 +4760,12 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	void *rsp_org)
 {
 	struct ksmbd_file *fp;
-	int rc = 0;
 	struct smb_ntsd *pntsd = (struct smb_ntsd *)rsp->Buffer;
+	struct smb_fattr *fattr;
 	__u32 secdesclen;
 	unsigned int id = KSMBD_NO_FID, pid = KSMBD_NO_FID;
 	int addition_info = le32_to_cpu(req->AdditionalInformation);
+	int rc = 0;
 
 	if (addition_info & ~(OWNER_SECINFO | GROUP_SECINFO | DACL_SECINFO)) {
 		ksmbd_debug(SMB, "Unsupported addition info: 0x%x)\n",
@@ -4802,7 +4803,8 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	if (!fp)
 		return -ENOENT;
 
-	rc = build_sec_desc(pntsd, &secdesclen, FP_INODE(fp)->i_mode);
+//	rc = build_sec_desc(pntsd, &secdesclen, FP_INODE(fp)->i_mode);
+	rc = build_sec_desc(pntsd, &secdesclen, fattr);
 	ksmbd_fd_put(work, fp);
 	if (rc)
 		return rc;
