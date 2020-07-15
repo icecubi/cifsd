@@ -5617,6 +5617,8 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		return rc;
 
 	inode->i_mode |= fattr.cf_mode & 07777;
+	//uid & gid update
+	//update acl
 	mark_inode_dirty(inode);
 
 	return 0;

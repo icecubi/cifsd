@@ -11,6 +11,10 @@
 #include "smbacl.h"
 #include "smb_common.h"
 
+static const struct smb_sid cifsd_domain = {1, 4, {0, 0, 0, 0, 0, 5},
+	{cpu_to_le32(21),
+	 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
+
 /* security id for everyone/world system group */
 static const struct smb_sid sid_everyone = {
 	1, 1, {0, 0, 0, 0, 0, 1}, {0} };
@@ -447,8 +451,6 @@ static int parse_sid(struct smb_sid *psid, char *end_of_acl)
 static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr)
 {
 	int rc = 0;
-	struct key *sidkey;
-	char *sidstr;
 
 	/*
 	 * If we have too many subauthorities, then something is really wrong.
@@ -460,31 +462,8 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		return -EIO;
 	}
 
-	sidstr = sid_to_key_str(psid, sidtype);
-	if (!sidstr)
-		return -ENOMEM;
+	// read acl
 
-//	sidkey = request_key(&cifs_idmap_key_type, sidstr, "");
-//	if (IS_ERR(sidkey)) {
-//		rc = -EINVAL;
-//		cifs_dbg(FYI, "%s: Can't map SID %s to a %cid\n",
-//			 __func__, sidstr, sidtype == SIDOWNER ? 'u' : 'g');
-//		goto out_revert_creds;
-//	}
-
-	/*
-	 * FIXME: Here we assume that uid_t and gid_t are same size. It's
-	 * probably a safe assumption but might be better to check based on
-	 * sidtype.
-	 */
-	BUILD_BUG_ON(sizeof(uid_t) != sizeof(gid_t));
-	if (sidkey->datalen != sizeof(uid_t)) {
-		rc = -EIO;
-		ksmbd_err("%s: Downcall contained malformed key (datalen=%hu)\n",
-			 __func__, sidkey->datalen);
-		key_invalidate(sidkey);
-		goto out_key_put;
-	}
 
 	if (sidtype == SIDOWNER) {
 		kuid_t uid;
@@ -501,10 +480,6 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		if (gid_valid(gid))
 			fattr->cf_gid = gid;
 	}
-
-out_key_put:
-	key_put(sidkey);
-	kfree(sidstr);
 
 	return rc;
 }
@@ -690,4 +665,11 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 
 	*secdesclen = le32_to_cpu(pntsd->gsidoffset) + sizeof(struct smb_sid);
 	return rc;
+}
+
+int init_domain()
+{
+	server_conf.domain_sid = {1, 4, {0, 0, 0, 0, 0, 5},
+		{cpu_to_le32(21),
+		 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 }

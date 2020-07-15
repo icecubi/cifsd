@@ -609,6 +609,9 @@ static int __init ksmbd_server_init(void)
 	ret = ksmbd_workqueue_init();
 	if (ret)
 		goto error;
+
+	init_domain();
+
 	return 0;
 
 error:

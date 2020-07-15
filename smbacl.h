@@ -122,5 +122,6 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr);
 int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 		struct smb_fattr *fattr);
+int init_domain(void);
 
 #endif /* _SMBACL_H */
