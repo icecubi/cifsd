@@ -4761,7 +4761,8 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 {
 	struct ksmbd_file *fp;
 	struct smb_ntsd *pntsd = (struct smb_ntsd *)rsp->Buffer;
-	struct smb_fattr *fattr;
+	struct smb_fattr fattr;
+	struct inode *inode;
 	__u32 secdesclen;
 	unsigned int id = KSMBD_NO_FID, pid = KSMBD_NO_FID;
 	int addition_info = le32_to_cpu(req->AdditionalInformation);
@@ -4803,8 +4804,12 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	if (!fp)
 		return -ENOENT;
 
-//	rc = build_sec_desc(pntsd, &secdesclen, FP_INODE(fp)->i_mode);
-	rc = build_sec_desc(pntsd, &secdesclen, fattr);
+	inode = FP_INODE(fp);
+	fattr.cf_uid = inode->i_uid;
+	fattr.cf_gid = inode->i_gid;
+	fattr.cf_mode = inode->i_mode;
+
+	rc = build_sec_desc(pntsd, &secdesclen, &fattr);
 	ksmbd_fd_put(work, fp);
 	if (rc)
 		return rc;
@@ -5612,13 +5617,16 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	}
 
 	fattr.cf_mode = 0;
-	rc = parse_sec_desc(pntsd, buf_len, &fattr);
+	rc = parse_sec_desc(pntsd, buf_len, &fattr, &acls);
 	if (rc)
 		return rc;
 
 	inode->i_mode |= fattr.cf_mode & 07777;
-	//uid & gid update
-	//update acl
+	inode->i_uid = fattr.cf_uid;
+	inode->i_gid = fattr.cf_gid;
+
+	//set acls
+
 	mark_inode_dirty(inode);
 
 	return 0;
