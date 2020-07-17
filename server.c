@@ -610,8 +610,6 @@ static int __init ksmbd_server_init(void)
 	if (ret)
 		goto error;
 
-	init_domain();
-
 	return 0;
 
 error:

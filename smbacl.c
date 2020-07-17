@@ -10,10 +10,11 @@
 #include <linux/string.h>
 #include "smbacl.h"
 #include "smb_common.h"
+#include "server.h"
 
 static const struct smb_sid cifsd_domain = {1, 4, {0, 0, 0, 0, 0, 5},
 	{cpu_to_le32(21),
-	 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
+	 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
 
 /* security id for everyone/world system group */
 static const struct smb_sid sid_everyone = {
@@ -21,6 +22,15 @@ static const struct smb_sid sid_everyone = {
 /* security id for Authenticated Users system group */
 static const struct smb_sid sid_authusers = {
 	1, 1, {0, 0, 0, 0, 0, 5}, {cpu_to_le32(11)} };
+
+/* S-1-22-1 Unmapped Unix users */
+static const struct smb_sid sid_unix_users = {1, 1, {0, 0, 0, 0, 0, 22},
+		{cpu_to_le32(1), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
+
+/* S-1-22-2 Unmapped Unix groups */
+static const struct smb_sid sid_unix_groups = { 1, 1, {0, 0, 0, 0, 0, 22},
+		{cpu_to_le32(2), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
+
 /*
  * See http://technet.microsoft.com/en-us/library/hh509017(v=ws.10).aspx
  */
@@ -41,54 +51,6 @@ static const struct smb_sid sid_unix_NFS_groups = { 1, 2, {0, 0, 0, 0, 0, 5},
 static const struct smb_sid sid_unix_NFS_mode = { 1, 2, {0, 0, 0, 0, 0, 5},
 	{cpu_to_le32(88),
 	 cpu_to_le32(3), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
-
-static char *
-sid_to_key_str(struct smb_sid *sidptr, unsigned int type)
-{
-	int i, len;
-	unsigned int saval;
-	char *sidstr, *strptr;
-	unsigned long long id_auth_val;
-
-	/* 3 bytes for prefix */
-	sidstr = kmalloc(3 + SID_STRING_BASE_SIZE +
-			 (SID_STRING_SUBAUTH_SIZE * sidptr->num_subauth),
-			 GFP_KERNEL);
-	if (!sidstr)
-		return sidstr;
-
-	strptr = sidstr;
-	len = sprintf(strptr, "%cs:S-%hhu", type == SIDOWNER ? 'o' : 'g',
-			sidptr->revision);
-	strptr += len;
-
-	/* The authority field is a single 48-bit number */
-	id_auth_val = (unsigned long long)sidptr->authority[5];
-	id_auth_val |= (unsigned long long)sidptr->authority[4] << 8;
-	id_auth_val |= (unsigned long long)sidptr->authority[3] << 16;
-	id_auth_val |= (unsigned long long)sidptr->authority[2] << 24;
-	id_auth_val |= (unsigned long long)sidptr->authority[1] << 32;
-	id_auth_val |= (unsigned long long)sidptr->authority[0] << 48;
-
-	/*
-	 * MS-DTYP states that if the authority is >= 2^32, then it should be
-	 * expressed as a hex value.
-	 */
-	if (id_auth_val <= UINT_MAX)
-		len = sprintf(strptr, "-%llu", id_auth_val);
-	else
-		len = sprintf(strptr, "-0x%llx", id_auth_val);
-
-	strptr += len;
-
-	for (i = 0; i < sidptr->num_subauth; ++i) {
-		saval = le32_to_cpu(sidptr->sub_auth[i]);
-		len = sprintf(strptr, "-%u", saval);
-		strptr += len;
-	}
-
-	return sidstr;
-}
 
 /*
  * if the two SIDs (roughly equivalent to a UUID for a user or group) are
@@ -462,20 +424,19 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		return -EIO;
 	}
 
-	// read acl
-
-
 	if (sidtype == SIDOWNER) {
 		kuid_t uid;
 		uid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(uid_t));
+
+		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
 		uid = make_kuid(&init_user_ns, id);
 		if (uid_valid(uid))
 			fattr->cf_uid = uid;
 	} else {
 		kgid_t gid;
 		gid_t id;
-		memcpy(&id, &sidkey->payload.data[0], sizeof(gid_t));
+		
+		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
 		gid = make_kgid(&init_user_ns, id);
 		if (gid_valid(gid))
 			fattr->cf_gid = gid;
@@ -543,57 +504,18 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	return rc;
 }
 
-static int id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
+static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
 {
-	int rc;
-	struct key *sidkey;
-	struct smb_sid *ksid;
-	unsigned int ksid_size;
-	char desc[3 + 10 + 1]; /* 3 byte prefix + 10 bytes for value + NULL */
+	if (sidtype == SIDOWNER) {
+		smb_copy_sid(ssid, &cifsd_domain);
+	} else {
+		/* sidtype == SIDGROUP */
+		smb_copy_sid(ssid, &sid_unix_groups);
+	}
 
-	rc = snprintf(desc, sizeof(desc), "%ci:%u",
-			sidtype == SIDOWNER ? 'o' : 'g', cid);
-	if (rc >= sizeof(desc))
-		return -EINVAL;
-
-	rc = 0;
-//	sidkey = request_key(&cifs_idmap_key_type, desc, "");
-//	if (IS_ERR(sidkey)) {
-//		rc = -EINVAL;
-//		ksmbd_err("%s: Can't map %cid %u to a SID\n",
-//				__func__, sidtype == SIDOWNER ? 'u' : 'g', cid);
-//		goto out_revert_creds;
-//	} else if (sidkey->datalen < CIFS_SID_BASE_SIZE) {
-//		rc = -EIO;
-//		ksmbd_err("%s: Downcall contained malformed key (datalen=%hu)\n",
-//				__func__, sidkey->datalen);
-//		goto invalidate_key;
-//	}
-
-	/*
-	 * A sid is usually too large to be embedded in payload.value, but if
-	 * there are no subauthorities and the host has 8-byte pointers, then
-	 */
-//	ksid = sidkey->datalen <= sizeof(sidkey->payload) ?
-//		(struct smb_sid *)&sidkey->payload :
-//		(struct smb_sid *)sidkey->payload.data[0];
-
-//	ksid_size = CIFS_SID_BASE_SIZE + (ksid->num_subauth * sizeof(__le32));
-//	if (ksid_size > sidkey->datalen) {
-//		rc = -EIO;
-//		ksmbd_err("%s: Downcall contained malformed key (datalen=%hu, ksid_size=%u)\n",
-//				__func__, sidkey->datalen, ksid_size);
-//		goto invalidate_key;
-//	}
-
-	smb_copy_sid(ssid, ksid);
-//out_key_put:
-//	key_put(sidkey);
-	return rc;
-
-//invalidate_key:
-//	key_invalidate(sidkey);
-//	goto out_key_put;
+	/* RID */
+	ssid->sub_auth[ssid->num_subauth] = cid;
+	ssid->num_subauth++;
 }
 
 /* Convert permission bits from mode to equivalent CIFS ACL */
@@ -614,13 +536,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 		return -ENOMEM;
 
 	uid = from_kuid(&init_user_ns, fattr->cf_uid);
-	rc = id_to_sid(uid, SIDOWNER, nowner_sid_ptr);
-	if (rc) {
-		ksmbd_err("%s: Mapping error %d for owner id %d\n",
-				__func__, rc, uid);
-		kfree(nowner_sid_ptr);
-		return rc;
-	}
+	id_to_sid(uid, SIDOWNER, nowner_sid_ptr);
 
 	ngroup_sid_ptr = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
 	if (!ngroup_sid_ptr) {
@@ -629,14 +545,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 	}
 
 	gid = from_kgid(&init_user_ns, fattr->cf_gid);
-	rc = id_to_sid(gid, SIDGROUP, ngroup_sid_ptr);
-	if (rc) {
-		ksmbd_err("%s: Mapping error %d for group id %d\n",
-				__func__, rc, gid);
-		kfree(nowner_sid_ptr);
-		kfree(ngroup_sid_ptr);
-		return rc;
-	}
+	id_to_sid(gid, SIDGROUP, ngroup_sid_ptr);
 
 	owner_sid_ptr = (struct smb_sid *)((char *)pntsd + sidsoffset);
 	smb_copy_sid(owner_sid_ptr, nowner_sid_ptr);
@@ -665,11 +574,4 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 
 	*secdesclen = le32_to_cpu(pntsd->gsidoffset) + sizeof(struct smb_sid);
 	return rc;
-}
-
-int init_domain()
-{
-	server_conf.domain_sid = {1, 4, {0, 0, 0, 0, 0, 5},
-		{cpu_to_le32(21),
-		 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}};
 }
