@@ -325,14 +325,33 @@ static unsigned int setup_special_mode_ACE(struct smb_ace *pntace, umode_t mode)
 	return ace_size;
 }
 
-static int set_chmod_dacl(struct smb_acl *pndacl,
+static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
+{
+	if (sidtype == SIDOWNER) {
+		smb_copy_sid(ssid, &cifsd_domain);
+	} else {
+		/* sidtype == SIDGROUP */
+		smb_copy_sid(ssid, &sid_unix_groups);
+	}
+
+	/* RID */
+	ssid->sub_auth[ssid->num_subauth] = cid;
+	ssid->num_subauth++;
+}
+
+static int set_dacl(struct smb_acl *pndacl,
 		const struct smb_sid *pownersid,
-		const struct smb_sid *pgrpsid, umode_t mode)
+		const struct smb_sid *pgrpsid,
+		struct smb_fattr *fattr)
 {
 	u16 size = 0;
 	u32 num_aces = 0;
 	struct smb_acl *pnndacl;
 	struct smb_ace *pntace;
+	umode_t mode = fattr->cf_mode;
+	struct posix_acl_entry *pace;
+	struct smb_sid *sid;
+	int i;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
 	pntace = (struct smb_ace *)((char *)pnndacl + size);
@@ -348,6 +367,29 @@ static int set_chmod_dacl(struct smb_acl *pndacl,
 	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
 					 &sid_everyone, mode, 0007);
 	num_aces++;
+
+	pace = fattr->cf_acls->a_entries;
+	for (i = 0; i < fattr->cf_acls->a_count; i++) {
+		sid = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
+		if (!sid)
+			break;
+
+		if (pace->e_tag == ACL_USER_OBJ || pace->e_tag == ACL_USER) {
+			uid_t uid;
+
+			uid = from_kuid(&init_user_ns, pace->e_uid);
+			id_to_sid(uid, SIDOWNER, sid);
+		} else if (pace->e_tag == ACL_GROUP_OBJ || pace->e_tag == ACL_GROUP) {
+			gid_t gid;
+
+			gid = from_kgid(&init_user_ns, pace->e_gid);
+			id_to_sid(gid, SIDGROUP, sid);
+		}
+
+		size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
+					sid, pace->e_perm, 0777);
+		num_aces++;
+	}
 
 	pndacl->num_aces = cpu_to_le32(num_aces);
 	pndacl->size = cpu_to_le16(size + sizeof(struct smb_acl));
@@ -481,20 +523,6 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	return rc;
 }
 
-static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
-{
-	if (sidtype == SIDOWNER) {
-		smb_copy_sid(ssid, &cifsd_domain);
-	} else {
-		/* sidtype == SIDGROUP */
-		smb_copy_sid(ssid, &sid_unix_groups);
-	}
-
-	/* RID */
-	ssid->sub_auth[ssid->num_subauth] = cid;
-	ssid->num_subauth++;
-}
-
 /* Convert permission bits from mode to equivalent CIFS ACL */
 int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 		struct smb_fattr *fattr)
@@ -538,8 +566,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
 	dacl_ptr->size = 0;
 	dacl_ptr->num_aces = 0;
 
-	rc = set_chmod_dacl(dacl_ptr, owner_sid_ptr,
-		group_sid_ptr, fattr->cf_mode);
+	rc = set_dacl(dacl_ptr, owner_sid_ptr, group_sid_ptr, fattr);
 	sidsoffset = dacloffset + le16_to_cpu(dacl_ptr->size);
 
 	pntsd->osidoffset = cpu_to_le32(sidsoffset);
