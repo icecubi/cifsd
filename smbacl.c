@@ -8,6 +8,7 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/posix_acl.h>
 #include "smbacl.h"
 #include "smb_common.h"
 #include "server.h"
@@ -120,58 +121,30 @@ smb_copy_sid(struct smb_sid *dst, const struct smb_sid *src)
  * pmode is the existing mode (we only want to overwrite part of this
  * bits to set can be: S_IRWXU, S_IRWXG or S_IRWXO ie 00700 or 00070 or 00007
  */
-static void access_flags_to_mode(__le32 ace_flags, int type, umode_t *pmode,
-				 umode_t *pbits_to_set)
+static umode_t access_flags_to_mode(__le32 ace_flags, int type,
+				 umode_t pbits_to_set)
 {
 	__u32 flags = le32_to_cpu(ace_flags);
-	/*
-	 * the order of ACEs is important.  The canonical order is to begin with
-	 * DENY entries followed by ALLOW, otherwise an allow entry could be
-	 * encountered first, making the subsequent deny entry like "dead code"
-	 * which would be superfluous since Windows stops when a match is made
-	 * for the operation you are trying to perform for your user
-	 */
-
-	/*
-	 * For deny ACEs we change the mask so that subsequent allow access
-	 * control entries do not turn on the bits we are denying
-	 */
-	if (type == ACCESS_DENIED) {
-		if (flags & GENERIC_ALL)
-			*pbits_to_set &= ~0777;
-
-		if ((flags & GENERIC_WRITE) ||
-			((flags & FILE_WRITE_RIGHTS) == FILE_WRITE_RIGHTS))
-			*pbits_to_set &= ~0222;
-		if ((flags & GENERIC_READ) ||
-			((flags & FILE_READ_RIGHTS) == FILE_READ_RIGHTS))
-			*pbits_to_set &= ~0444;
-		if ((flags & GENERIC_EXECUTE) ||
-			((flags & FILE_EXEC_RIGHTS) == FILE_EXEC_RIGHTS))
-			*pbits_to_set &= ~0111;
-		return;
-	} else if (type != ACCESS_ALLOWED) {
-		ksmbd_err("unknown access control type %d\n", type);
-		return;
-	}
-	/* else ACCESS_ALLOWED type */
+	umode_t mode = 0;
 
 	if (flags & GENERIC_ALL) {
-		*pmode |= (0777 & (*pbits_to_set));
+		mode = (0777 & (pbits_to_set));
 		ksmbd_err("all perms\n");
-		return;
+		return mode;
 	}
 	if ((flags & GENERIC_WRITE) ||
 			((flags & FILE_WRITE_RIGHTS) == FILE_WRITE_RIGHTS))
-		*pmode |= (0222 & (*pbits_to_set));
+		mode = (0222 & (pbits_to_set));
 	if ((flags & GENERIC_READ) ||
 			((flags & FILE_READ_RIGHTS) == FILE_READ_RIGHTS))
-		*pmode |= (0444 & (*pbits_to_set));
+		mode = (0444 & (pbits_to_set));
 	if ((flags & GENERIC_EXECUTE) ||
 			((flags & FILE_EXEC_RIGHTS) == FILE_EXEC_RIGHTS))
-		*pmode |= (0111 & (*pbits_to_set));
+		mode = (0111 & (pbits_to_set));
 
-	ksmbd_debug(SMB, "access flags 0x%x mode now %04o\n", flags, *pmode);
+	ksmbd_debug(SMB, "access flags 0x%x mode now %04o\n", flags, mode);
+
+	return mode;
 }
 
 /*
@@ -240,17 +213,13 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	int acl_size;
 	char *acl_base;
 	struct smb_ace **ppace;
+	struct posix_acl_entry *cf_pace;
+	umode_t mode;
 
 	/* BB need to add parm so we can store the SID BB */
 
-	if (!pdacl) {
-		/*
-		 * no DACL in the security descriptor, set
-		 * all the permissions for user/group/other
-		 */
-		fattr->cf_mode |= 0777;
+	if (!pdacl)
 		return;
-	}
 
 	/* validate that we do not go past end of acl */
 	if (end_of_acl < (char *)pdacl + le16_to_cpu(pdacl->size)) {
@@ -281,38 +250,46 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		if (!ppace)
 			return;
 
-		for (i = 0; i < num_aces; ++i) {
-			umode_t user_mask = 0700;
-			umode_t group_mask = 0070;
-			umode_t other_mask = 0777;
+		fattr->cf_acls = posix_acl_alloc(num_aces, GFP_KERNEL);
+		if (!fattr->cf_acls)
+			return;
 
+		cf_pace = fattr->cf_acls->a_entries;
+		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
+
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
 				fattr->cf_mode =
 					le32_to_cpu(ppace[i]->sid.sub_auth[2]);
 				break;
-			} else if (!compare_sids(&(ppace[i]->sid), pownersid))
-				access_flags_to_mode(ppace[i]->access_req,
+			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
-						     &fattr->cf_mode,
-						     &user_mask);
-			else if (!compare_sids(&(ppace[i]->sid), pgrpsid))
-				access_flags_to_mode(ppace[i]->access_req,
+						     0700);
+				cf_pace->e_tag = ACL_USER_OBJ;
+				cf_pace->e_uid = fattr->cf_uid;
+			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
-						     &fattr->cf_mode,
-						     &group_mask);
-			else if (!compare_sids(&(ppace[i]->sid), &sid_everyone))
-				access_flags_to_mode(ppace[i]->access_req,
+						     0070);
+				cf_pace->e_tag = ACL_GROUP_OBJ;
+				cf_pace->e_gid = fattr->cf_gid;
+			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
-						     &fattr->cf_mode,
-						     &other_mask);
-			else if (!compare_sids(&(ppace[i]->sid),
-					       &sid_authusers))
-				access_flags_to_mode(ppace[i]->access_req,
+						     0777);
+				cf_pace->e_tag = ACL_OTHER;
+			} else if (!compare_sids(&(ppace[i]->sid),
+						&sid_authusers)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
-						     &fattr->cf_mode,
-						     &other_mask);
+						     0777);
+				cf_pace->e_tag = ACL_OTHER;
+			}
+
+			cf_pace->e_perm = mode;
+			fattr->cf_mode |= mode;
 
 			acl_base = (char *)ppace[i];
 			acl_size = le16_to_cpu(ppace[i]->size);

@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 #include <linux/namei.h>
 #include <uapi/linux/xattr.h>
+#include <linux/posix_acl.h>
 
 /* CREATION TIME XATTR PREFIX */
 #define CREATION_TIME_PREFIX		"creation.time."
@@ -237,5 +238,8 @@ int ksmbd_vfs_fill_dentry_attrs(struct ksmbd_work *work,
 int ksmbd_vfs_posix_lock_wait(struct file_lock *flock);
 int ksmbd_vfs_posix_lock_wait_timeout(struct file_lock *flock, long timeout);
 void ksmbd_vfs_posix_lock_unblock(struct file_lock *flock);
+
+int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
+		struct posix_acl *acl);
 
 #endif /* __KSMBD_VFS_H__ */

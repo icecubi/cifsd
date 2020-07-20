@@ -4809,6 +4809,8 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	fattr.cf_gid = inode->i_gid;
 	fattr.cf_mode = inode->i_mode;
 
+	fattr.cf_acls = get_acl(inode, ACL_TYPE_ACCESS);
+
 	rc = build_sec_desc(pntsd, &secdesclen, &fattr);
 	ksmbd_fd_put(work, fp);
 	if (rc)
@@ -5617,7 +5619,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	}
 
 	fattr.cf_mode = 0;
-	rc = parse_sec_desc(pntsd, buf_len, &fattr, &acls);
+	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
 
@@ -5626,10 +5628,11 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	inode->i_gid = fattr.cf_gid;
 
 	//set acls
+	rc = set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+	if (!rc)
+		mark_inode_dirty(inode);
 
-	mark_inode_dirty(inode);
-
-	return 0;
+	return rc;
 }
 
 /**

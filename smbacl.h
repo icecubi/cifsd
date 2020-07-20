@@ -116,6 +116,7 @@ struct smb_fattr {
 	kuid_t	cf_uid;
 	kgid_t	cf_gid;
 	umode_t	cf_mode;
+	struct posix_acl *cf_acls;
 };
 
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,

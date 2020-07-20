@@ -1395,6 +1395,12 @@ int ksmbd_vfs_fsetxattr(struct ksmbd_work *work,
 }
 #endif
 
+int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
+		struct posix_acl *acl)
+{
+	return set_posix_acl(inode, type, acl);
+}
+
 /**
  * ksmbd_vfs_set_fadvise() - convert smb IO caching options to linux options
  * @filp:	file pointer for IO
