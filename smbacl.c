@@ -339,10 +339,8 @@ static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
 	ssid->num_subauth++;
 }
 
-static int set_dacl(struct smb_acl *pndacl,
-		const struct smb_sid *pownersid,
-		const struct smb_sid *pgrpsid,
-		struct smb_fattr *fattr)
+static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
+		const struct smb_sid *pgrpsid, struct smb_fattr *fattr)
 {
 	u16 size = 0;
 	u32 num_aces = 0;
@@ -354,10 +352,11 @@ static int set_dacl(struct smb_acl *pndacl,
 	int i;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
+#if 0
 	pntace = (struct smb_ace *)((char *)pnndacl + size);
 	size += setup_special_mode_ACE(pntace, mode);
 	num_aces++;
-
+#endif
 	size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
 					pownersid, mode, 0700);
 	num_aces++;
@@ -399,8 +398,6 @@ static int set_dacl(struct smb_acl *pndacl,
 out:
 	pndacl->num_aces = cpu_to_le32(num_aces);
 	pndacl->size = cpu_to_le16(size + sizeof(struct smb_acl));
-
-	return 0;
 }
 
 static int parse_sid(struct smb_sid *psid, char *end_of_acl)
@@ -541,39 +538,34 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	uid_t uid;
 	gid_t gid;
 
-	if (addition_info == OWNER_SECINFO) { 
-		nowner_sid_ptr = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
-		if (!nowner_sid_ptr)
-			return -ENOMEM;
+	nowner_sid_ptr = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
+	if (!nowner_sid_ptr)
+		return -ENOMEM;
 
-		uid = from_kuid(&init_user_ns, fattr->cf_uid);
-		id_to_sid(uid, SIDOWNER, nowner_sid_ptr);
+	uid = from_kuid(&init_user_ns, fattr->cf_uid);
+	id_to_sid(uid, SIDOWNER, nowner_sid_ptr);
+
+	ngroup_sid_ptr = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
+	if (!ngroup_sid_ptr) {
+		kfree(nowner_sid_ptr);
+		return -ENOMEM;
 	}
 
-	if (addition_info == GROUP_SECINFO) { 
-		ngroup_sid_ptr = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
-		if (!ngroup_sid_ptr) {
-			kfree(nowner_sid_ptr);
-			return -ENOMEM;
-		}
-
-		gid = from_kgid(&init_user_ns, fattr->cf_gid);
-		id_to_sid(gid, SIDGROUP, ngroup_sid_ptr);
-	}
+	gid = from_kgid(&init_user_ns, fattr->cf_gid);
+	id_to_sid(gid, SIDGROUP, ngroup_sid_ptr);
 
 	offset = sizeof(struct smb_ntsd);
 	pntsd->sacloffset = 0;
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
-	dacl_ptr->size = 0;
-	dacl_ptr->num_aces = 0;
 
 	if (addition_info == DACL_SECINFO) { 
 		dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);
-		dacl_ptr->revision = cpu_to_le16(1);
+		dacl_ptr->revision = cpu_to_le16(2);
 		dacl_ptr->size = 0;
 		dacl_ptr->num_aces = 0;
-		rc = set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
+		pntsd->type = DACL_PRESENT | DACL_PROTECTED | SELF_RELATIVE;
+		set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
 		pntsd->dacloffset = cpu_to_le32(offset);
 		offset += le16_to_cpu(dacl_ptr->size);
 	}
