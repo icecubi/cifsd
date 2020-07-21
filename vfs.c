@@ -1398,7 +1398,7 @@ int ksmbd_vfs_fsetxattr(struct ksmbd_work *work,
 int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		struct posix_acl *acl)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 21)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(4, 4, 21)
 	int ret;
 
 	if (!IS_POSIXACL(inode))

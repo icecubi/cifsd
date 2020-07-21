@@ -121,7 +121,7 @@ struct smb_fattr {
 
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr);
-int build_sec_desc(struct smb_ntsd *pntsd, __u32 *secdesclen,
+int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 		struct smb_fattr *fattr);
 
 #endif /* _SMBACL_H */

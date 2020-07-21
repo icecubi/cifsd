@@ -4811,7 +4811,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 
 	fattr.cf_acls = get_acl(inode, ACL_TYPE_ACCESS);
 
-	rc = build_sec_desc(pntsd, &secdesclen, &fattr);
+	rc = build_sec_desc(pntsd, addition_info, &secdesclen, &fattr);
 	ksmbd_fd_put(work, fp);
 	if (rc)
 		return rc;
