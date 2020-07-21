@@ -368,6 +368,9 @@ static int set_dacl(struct smb_acl *pndacl,
 					 &sid_everyone, mode, 0007);
 	num_aces++;
 
+	if (!fattr->cf_acls)
+		goto out;
+
 	pace = fattr->cf_acls->a_entries;
 	for (i = 0; i < fattr->cf_acls->a_count; i++) {
 		sid = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
@@ -379,18 +382,21 @@ static int set_dacl(struct smb_acl *pndacl,
 
 			uid = from_kuid(&init_user_ns, pace->e_uid);
 			id_to_sid(uid, SIDOWNER, sid);
-		} else if (pace->e_tag == ACL_GROUP_OBJ || pace->e_tag == ACL_GROUP) {
+		} else if (pace->e_tag == ACL_GROUP_OBJ ||
+			   pace->e_tag == ACL_GROUP) {
 			gid_t gid;
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDGROUP, sid);
 		}
 
-		size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
-					sid, pace->e_perm, 0777);
+		size += fill_ace_for_sid(
+			(struct smb_ace *) ((char *)pnndacl + size),
+				sid, pace->e_perm, 0777);
 		num_aces++;
 	}
 
+out:
 	pndacl->num_aces = cpu_to_le32(num_aces);
 	pndacl->size = cpu_to_le16(size + sizeof(struct smb_acl));
 

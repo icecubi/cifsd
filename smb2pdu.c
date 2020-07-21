@@ -5612,13 +5612,6 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	struct smb_fattr fattr;
 	int rc;
 
-	if (addition_info != DACL_SECINFO) {
-		ksmbd_debug(SMB, "Unsupported addition info: 0x%x)\n",
-			addition_info);
-		return -EOPNOTSUPP;
-	}
-
-	fattr.cf_mode = 0;
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
@@ -5628,7 +5621,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	inode->i_gid = fattr.cf_gid;
 
 	//set acls
-	rc = set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
 	if (!rc)
 		mark_inode_dirty(inode);
 

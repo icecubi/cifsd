@@ -1398,7 +1398,26 @@ int ksmbd_vfs_fsetxattr(struct ksmbd_work *work,
 int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		struct posix_acl *acl)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 4, 21)
+	int ret;
+
+	if (!IS_POSIXACL(inode))
+		return -EOPNOTSUPP;
+	if (!inode->i_op->set_acl)
+		return -EOPNOTSUPP;
+
+	if (type == ACL_TYPE_DEFAULT && !S_ISDIR(inode->i_mode))
+		return -EACCES;
+	if (!inode_owner_or_capable(inode))
+		return -EPERM;
+
+	ret = inode->i_op->set_acl(inode, acl, type);
+	posix_acl_release(acl);
+
+	return ret;
+#else
 	return set_posix_acl(inode, type, acl);
+#endif
 }
 
 /**
