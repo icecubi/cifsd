@@ -1410,11 +1410,13 @@ int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		return -EACCES;
 	if (!inode_owner_or_capable(inode))
 		return -EPERM;
+	if (!acl)
+		return -EINVAL;
 
-	ret = inode->i_op->set_acl(inode, acl, type);
-	posix_acl_release(acl);
-
-	return ret;
+	ret = posix_acl_valid(acl);
+	if (ret)
+		return ret;
+	return inode->i_op->set_acl(inode, acl, type);
 #else
 	return set_posix_acl(inode, type, acl);
 #endif

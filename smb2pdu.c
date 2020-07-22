@@ -4818,6 +4818,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 
 	rsp->OutputBufferLength = cpu_to_le32(secdesclen);
 	inc_rfc1001_len(rsp_org, secdesclen);
+	posix_acl_release(fattr.cf_acls);
 
 	return 0;
 }
@@ -5624,7 +5625,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
 	if (!rc)
 		mark_inode_dirty(inode);
-
+	posix_acl_release(fattr.cf_acls);
 	return rc;
 }
 

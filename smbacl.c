@@ -290,6 +290,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 			cf_pace->e_perm = mode;
 			fattr->cf_mode |= mode;
+			cf_pace++;
 
 			acl_base = (char *)ppace[i];
 			acl_size = le16_to_cpu(ppace[i]->size);
@@ -367,22 +368,24 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 					 &sid_everyone, mode, 0007);
 	num_aces++;
 
-	if (!fattr->cf_acls)
+	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
 		goto out;
 
 	pace = fattr->cf_acls->a_entries;
-	for (i = 0; i < fattr->cf_acls->a_count; i++) {
+	for (i = 0; i < fattr->cf_acls->a_count; i++, pace++) {
 		sid = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
 		if (!sid)
 			break;
 
-		if (pace->e_tag == ACL_USER_OBJ || pace->e_tag == ACL_USER) {
+		if (pace->e_tag != ACL_USER && pace->e_tag != ACL_GROUP)
+			continue;
+
+		if (pace->e_tag == ACL_USER) {
 			uid_t uid;
 
 			uid = from_kuid(&init_user_ns, pace->e_uid);
 			id_to_sid(uid, SIDOWNER, sid);
-		} else if (pace->e_tag == ACL_GROUP_OBJ ||
-			   pace->e_tag == ACL_GROUP) {
+		} else if (pace->e_tag == ACL_GROUP) {
 			gid_t gid;
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
