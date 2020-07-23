@@ -18,6 +18,13 @@ static const struct smb_sid cifsd_domain = {1, 4, {0, 0, 0, 0, 0, 5},
 	 1, 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
 
 /* security id for everyone/world system group */
+static const struct smb_sid creator_owner = {
+	1, 1, {0, 0, 0, 0, 0, 3}, {0} };
+/* security id for everyone/world system group */
+static const struct smb_sid creator_group = {
+	1, 1, {0, 0, 0, 0, 0, 3}, {cpu_to_le32(1)} };
+
+/* security id for everyone/world system group */
 static const struct smb_sid sid_everyone = {
 	1, 1, {0, 0, 0, 0, 0, 1}, {0} };
 /* security id for Authenticated Users system group */
@@ -178,14 +185,14 @@ static void mode_to_access_flags(umode_t mode, umode_t bits_to_use,
 }
 
 static __u16 fill_ace_for_sid(struct smb_ace *pntace,
-			const struct smb_sid *psid, umode_t mode, umode_t bits)
+			const struct smb_sid *psid, int flags, umode_t mode, umode_t bits)
 {
 	int i;
 	__u16 size = 0;
 	__u32 access_req = 0;
 
 	pntace->type = ACCESS_ALLOWED;
-	pntace->flags = 0x0;
+	pntace->flags = flags;
 	mode_to_access_flags(mode, bits, &access_req);
 	if (!access_req)
 		access_req = SET_MINIMUM_RIGHTS;
@@ -328,11 +335,21 @@ static unsigned int setup_special_mode_ACE(struct smb_ace *pntace, umode_t mode)
 
 static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
 {
-	if (sidtype == SIDOWNER) {
+	switch (sidtype) {
+	case SIDOWNER:
 		smb_copy_sid(ssid, &cifsd_domain);
-	} else {
-		/* sidtype == SIDGROUP */
+		break;
+	case SIDGROUP:
 		smb_copy_sid(ssid, &sid_unix_groups);
+		break;
+	case SIDCREATOR_OWNER:
+		smb_copy_sid(ssid, &creator_owner);
+		return;
+	case SIDCREATOR_GROUP:
+		smb_copy_sid(ssid, &creator_group);
+		return;
+	default:
+		return;
 	}
 
 	/* RID */
@@ -351,6 +368,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	struct posix_acl_entry *pace;
 	struct smb_sid *sid;
 	int i;
+	int flags = 0;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
 #if 0
@@ -359,15 +377,15 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	num_aces++;
 #endif
 	size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
-					pownersid, mode, 0700);
+					pownersid, flags, mode, 0700);
 	num_aces++;
 	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
-					pgrpsid, mode, 0070);
+					pgrpsid, flags, mode, 0070);
 	num_aces++;
 	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
-					 &sid_everyone, mode, 0007);
+					 &sid_everyone, flags, mode, 0007);
 	num_aces++;
-
+	
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
 		goto out;
 
@@ -376,9 +394,6 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 		sid = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
 		if (!sid)
 			break;
-
-		if (pace->e_tag != ACL_USER && pace->e_tag != ACL_GROUP)
-			continue;
 
 		if (pace->e_tag == ACL_USER) {
 			uid_t uid;
@@ -390,12 +405,50 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDGROUP, sid);
-		}
+		} else
+			continue;
+
+		if (fattr->cf_dacls)
+			flags = 0x03;
 
 		size += fill_ace_for_sid(
 			(struct smb_ace *) ((char *)pnndacl + size),
-				sid, pace->e_perm, 0777);
+				sid, flags, pace->e_perm, 0777);
 		num_aces++;
+		kfree(sid);
+	}
+
+	if (!fattr->cf_dacls || IS_ERR(fattr->cf_dacls))
+		goto out;
+
+	flags = 0x0b;
+	pace = fattr->cf_dacls->a_entries;
+	for (i = 0; i < fattr->cf_acls->a_count; i++, pace++) {
+		sid = kmalloc(sizeof(struct smb_sid), GFP_KERNEL);
+		if (!sid)
+			break;
+
+		if (pace->e_tag == ACL_USER) {
+			uid_t uid;
+
+			uid = from_kuid(&init_user_ns, pace->e_uid);
+			id_to_sid(uid, SIDCREATOR_OWNER, sid);
+		} else if (pace->e_tag == ACL_GROUP) {
+			gid_t gid;
+
+			gid = from_kgid(&init_user_ns, pace->e_gid);
+			id_to_sid(gid, SIDCREATOR_GROUP, sid);
+		} else if (pace->e_tag == ACL_OTHER) {
+
+			smb_copy_sid(sid, &sid_everyone);
+		} else
+			continue;
+
+		size += fill_ace_for_sid(
+			(struct smb_ace *) ((char *)pnndacl + size),
+				sid, flags, pace->e_perm, 0777);
+		num_aces++;
+		kfree(sid);
 	}
 
 out:

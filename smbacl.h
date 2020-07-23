@@ -16,6 +16,8 @@
 
 #define SIDOWNER 1
 #define SIDGROUP 2
+#define SIDCREATOR_OWNER 3
+#define SIDCREATOR_GROUP 4
 
 /* Revision for ACLs */
 #define SD_REVISION	1
@@ -117,6 +119,7 @@ struct smb_fattr {
 	kgid_t	cf_gid;
 	umode_t	cf_mode;
 	struct posix_acl *cf_acls;
+	struct posix_acl *cf_dacls;
 };
 
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
