@@ -211,6 +211,65 @@ static __u16 fill_ace_for_sid(struct smb_ace *pntace,
 	return size;
 }
 
+static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
+{
+	switch (sidtype) {
+	case SIDOWNER:
+		smb_copy_sid(ssid, &cifsd_domain);
+		break;
+	case SIDGROUP:
+		smb_copy_sid(ssid, &sid_unix_groups);
+		break;
+	case SIDCREATOR_OWNER:
+		smb_copy_sid(ssid, &creator_owner);
+		return;
+	case SIDCREATOR_GROUP:
+		smb_copy_sid(ssid, &creator_group);
+		return;
+	default:
+		return;
+	}
+
+	/* RID */
+	ssid->sub_auth[ssid->num_subauth] = cid;
+	ssid->num_subauth++;
+}
+
+static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr)
+{
+	int rc = 0;
+
+	/*
+	 * If we have too many subauthorities, then something is really wrong.
+	 * Just return an error.
+	 */
+	if (unlikely(psid->num_subauth > SID_MAX_SUB_AUTHORITIES)) {
+		ksmbd_err("%s: %u subauthorities is too many!\n",
+			 __func__, psid->num_subauth);
+		return -EIO;
+	}
+
+	if (sidtype == SIDOWNER) {
+		kuid_t uid;
+		uid_t id;
+
+		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
+		uid = make_kuid(&init_user_ns, id);
+		if (uid_valid(uid))
+			fattr->cf_uid = uid;
+	} else {
+		kgid_t gid;
+		gid_t id;
+		
+		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
+		gid = make_kgid(&init_user_ns, id);
+		if (gid_valid(gid))
+			fattr->cf_gid = gid;
+	}
+
+	return rc;
+}
+
 static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
 		struct smb_fattr *fattr)
@@ -220,7 +279,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	int acl_size;
 	char *acl_base;
 	struct smb_ace **ppace;
-	struct posix_acl_entry *cf_pace;
+	struct posix_acl_entry *cf_pace, *cf_pdace;
 	umode_t mode;
 
 	/* BB need to add parm so we can store the SID BB */
@@ -256,13 +315,18 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				      GFP_KERNEL);
 		if (!ppace)
 			return;
-
-		fattr->cf_acls = posix_acl_alloc(num_aces, GFP_KERNEL);
+		/* num_aces + ACL_OWNER_OBJ + ACL_GROUP_OBJ, ACL_MASK */
+		fattr->cf_acls = posix_acl_alloc(num_aces + 3, GFP_KERNEL);
 		if (!fattr->cf_acls)
 			return;
 
+		fattr->cf_dacls = posix_acl_alloc(5, GFP_KERNEL);
+		if (!fattr->cf_dacls)
+			return;
+
 		cf_pace = fattr->cf_acls->a_entries;
-		for (i = 0; i < num_aces; ++i) {
+		cf_pdace = fattr->cf_dacls->a_entries;
+		for (i = 0; i < num_aces - 3; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
 
 			if ((compare_sids(&(ppace[i]->sid),
@@ -276,26 +340,71 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 						     0700);
 				cf_pace->e_tag = ACL_USER_OBJ;
 				cf_pace->e_uid = fattr->cf_uid;
+				cf_pace->e_perm = mode;
+				cf_pace++;
+				cf_pace->e_tag = ACL_USER;
+				cf_pace->e_uid = fattr->cf_uid;
+				cf_pace->e_perm = mode;
+
+				/* default acl */
+				cf_pdace->e_tag = ACL_USER_OBJ;
+				cf_pdace->e_uid = fattr->cf_uid;
+				cf_pdace->e_perm = mode;
+				cf_pdace++;
+				cf_pdace->e_tag = ACL_USER;
+				cf_pdace->e_uid = fattr->cf_uid;
+				cf_pdace->e_perm = mode;
+				cf_pdace++;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
 						     0070);
 				cf_pace->e_tag = ACL_GROUP_OBJ;
 				cf_pace->e_gid = fattr->cf_gid;
+				cf_pace->e_perm = mode;
+				cf_pace++;
+				cf_pace->e_tag = ACL_GROUP;
+				cf_pace->e_gid = fattr->cf_gid;
+				cf_pace->e_perm = mode;
+
+				/* default acl */
+				cf_pdace->e_tag = ACL_GROUP_OBJ;
+				cf_pdace->e_gid = fattr->cf_gid;
+				cf_pdace->e_perm = 0;
+				cf_pdace++;
+				cf_pdace->e_tag = ACL_GROUP;
+				cf_pdace->e_gid = fattr->cf_gid;
+				cf_pdace->e_perm = 0;
+				cf_pdace++;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
+				/* set ACL_MASK ace */
+				cf_pace->e_tag = ACL_MASK;
+				cf_pace->e_perm = 0777;
+				cf_pace++;
+
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
 						     0777);
 				cf_pace->e_tag = ACL_OTHER;
-			} else if (!compare_sids(&(ppace[i]->sid),
-						&sid_authusers)) {
+				cf_pace->e_perm = mode;
+			} else {
+				int rc;
+				struct smb_fattr temp_fattr;
+
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type,
 						     0777);
-				cf_pace->e_tag = ACL_OTHER;
+				rc = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
+				if (rc) {
+					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
+							__func__, rc);
+				} else {
+					cf_pace->e_uid = temp_fattr.cf_uid;
+				}
+				cf_pace->e_tag = ACL_USER;
+				cf_pace->e_perm = mode;
 			}
 
-			cf_pace->e_perm = mode;
 			fattr->cf_mode |= mode;
 			cf_pace++;
 
@@ -331,30 +440,6 @@ static unsigned int setup_special_mode_ACE(struct smb_ace *pntace, umode_t mode)
 	/* size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (psid->num_subauth*4) */
 	pntace->size = cpu_to_le16(ace_size);
 	return ace_size;
-}
-
-static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
-{
-	switch (sidtype) {
-	case SIDOWNER:
-		smb_copy_sid(ssid, &cifsd_domain);
-		break;
-	case SIDGROUP:
-		smb_copy_sid(ssid, &sid_unix_groups);
-		break;
-	case SIDCREATOR_OWNER:
-		smb_copy_sid(ssid, &creator_owner);
-		return;
-	case SIDCREATOR_GROUP:
-		smb_copy_sid(ssid, &creator_group);
-		return;
-	default:
-		return;
-	}
-
-	/* RID */
-	ssid->sub_auth[ssid->num_subauth] = cid;
-	ssid->num_subauth++;
 }
 
 static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
@@ -488,41 +573,6 @@ static int parse_sid(struct smb_sid *psid, char *end_of_acl)
 	return 0;
 }
 
-static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr)
-{
-	int rc = 0;
-
-	/*
-	 * If we have too many subauthorities, then something is really wrong.
-	 * Just return an error.
-	 */
-	if (unlikely(psid->num_subauth > SID_MAX_SUB_AUTHORITIES)) {
-		ksmbd_err("%s: %u subauthorities is too many!\n",
-			 __func__, psid->num_subauth);
-		return -EIO;
-	}
-
-	if (sidtype == SIDOWNER) {
-		kuid_t uid;
-		uid_t id;
-
-		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
-		uid = make_kuid(&init_user_ns, id);
-		if (uid_valid(uid))
-			fattr->cf_uid = uid;
-	} else {
-		kgid_t gid;
-		gid_t id;
-		
-		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
-		gid = make_kgid(&init_user_ns, id);
-		if (gid_valid(gid))
-			fattr->cf_gid = gid;
-	}
-
-	return rc;
-}
-
 /* Convert CIFS ACL to POSIX form */
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr)
@@ -579,6 +629,10 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	else
 		ksmbd_err("no ACL\n"); /* BB grant all or default perms? */
 
+	if (pntsd->type & DACL_AUTO_INHERITED) {
+		ksmbd_err("contain auto inherit!!\n");
+	}
+
 	return rc;
 }
 
@@ -614,13 +668,14 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	pntsd->sacloffset = 0;
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
+	pntsd->type = DACL_PROTECTED | SELF_RELATIVE;
 
 	if (addition_info == DACL_SECINFO) { 
 		dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);
 		dacl_ptr->revision = cpu_to_le16(2);
 		dacl_ptr->size = 0;
 		dacl_ptr->num_aces = 0;
-		pntsd->type = DACL_PRESENT | DACL_PROTECTED | SELF_RELATIVE;
+		pntsd->type |= DACL_PRESENT;
 		set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
 		pntsd->dacloffset = cpu_to_le32(offset);
 		offset += le16_to_cpu(dacl_ptr->size);
