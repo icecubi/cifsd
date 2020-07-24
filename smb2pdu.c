@@ -5625,12 +5625,9 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	inode->i_gid = fattr.cf_gid;
 
 	//set acls
+	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
 	if (S_ISDIR(inode->i_mode))
-		flags = ACL_TYPE_DEFAULT;
-	else
-		flags = ACL_TYPE_ACCESS;
-	
-	rc = ksmbd_vfs_set_posix_acl(inode, flags, fattr.cf_acls);
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 
 	if (!rc)
 		mark_inode_dirty(inode);

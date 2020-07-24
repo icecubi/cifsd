@@ -122,6 +122,39 @@ struct smb_fattr {
 	struct posix_acl *cf_dacls;
 };
 
+struct posix_ace_state {
+	u32 allow;
+	u32 deny;
+};
+
+struct posix_user_ace_state {
+	union {
+		kuid_t uid;
+		kgid_t gid;
+	};
+	struct posix_ace_state perms;
+};
+
+struct posix_ace_state_array {
+	int n;
+	struct posix_user_ace_state aces[];
+};
+
+/*
+ * while processing the nfsv4 ace, this maintains the partial permissions
+ * calculated so far: */
+
+struct posix_acl_state {
+	int empty;
+	struct posix_ace_state owner;
+	struct posix_ace_state group;
+	struct posix_ace_state other;
+	struct posix_ace_state everyone;
+	struct posix_ace_state mask; /* deny unused in this case */
+	struct posix_ace_state_array *users;
+	struct posix_ace_state_array *groups;
+};
+
 int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr);
 int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
