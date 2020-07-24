@@ -377,9 +377,9 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			return;
 
 		/* set owner group */
-		acl_state.owner.allow = fattr->cf_mode;
-		acl_state.group.allow = fattr->cf_mode;
-		acl_state.other.allow = fattr->cf_mode;
+		acl_state.owner.allow = (fattr->cf_mode & 0700) >> 6;
+		acl_state.group.allow = (fattr->cf_mode & 0070) >> 3;
+		acl_state.other.allow = fattr->cf_mode & 0007;
 
 		default_acl_state.owner.allow = fattr->cf_mode;
 		default_acl_state.group.allow = 0;
