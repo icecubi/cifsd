@@ -128,26 +128,25 @@ smb_copy_sid(struct smb_sid *dst, const struct smb_sid *src)
  * pmode is the existing mode (we only want to overwrite part of this
  * bits to set can be: S_IRWXU, S_IRWXG or S_IRWXO ie 00700 or 00070 or 00007
  */
-static umode_t access_flags_to_mode(__le32 ace_flags, int type,
-				 umode_t pbits_to_set)
+static umode_t access_flags_to_mode(__le32 ace_flags, int type)
 {
 	__u32 flags = le32_to_cpu(ace_flags);
 	umode_t mode = 0;
 
 	if (flags & GENERIC_ALL) {
-		mode = (0777 & (pbits_to_set));
+		mode = 0777;
 		ksmbd_err("all perms\n");
 		return mode;
 	}
 	if ((flags & GENERIC_WRITE) ||
 			((flags & FILE_WRITE_RIGHTS) == FILE_WRITE_RIGHTS))
-		mode = (0222 & (pbits_to_set));
+		mode = 0222;
 	if ((flags & GENERIC_READ) ||
 			((flags & FILE_READ_RIGHTS) == FILE_READ_RIGHTS))
-		mode = (0444 & (pbits_to_set));
+		mode = 0444;
 	if ((flags & GENERIC_EXECUTE) ||
 			((flags & FILE_EXEC_RIGHTS) == FILE_EXEC_RIGHTS))
-		mode = (0111 & (pbits_to_set));
+		mode = 0111;
 
 	ksmbd_debug(SMB, "access flags 0x%x mode now %04o\n", flags, mode);
 
@@ -326,7 +325,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 		cf_pace = fattr->cf_acls->a_entries;
 		cf_pdace = fattr->cf_dacls->a_entries;
-		for (i = 0; i < num_aces - 3; ++i) {
+		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
 
 			if ((compare_sids(&(ppace[i]->sid),
@@ -336,15 +335,14 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				break;
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type,
-						     0700);
+						     ppace[i]->type);
 				cf_pace->e_tag = ACL_USER_OBJ;
 				cf_pace->e_uid = fattr->cf_uid;
-				cf_pace->e_perm = mode;
+				cf_pace->e_perm = mode & 0007;
 				cf_pace++;
 				cf_pace->e_tag = ACL_USER;
 				cf_pace->e_uid = fattr->cf_uid;
-				cf_pace->e_perm = mode;
+				cf_pace->e_perm = mode & 0007;
 
 				/* default acl */
 				cf_pdace->e_tag = ACL_USER_OBJ;
@@ -355,17 +353,17 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				cf_pdace->e_uid = fattr->cf_uid;
 				cf_pdace->e_perm = mode;
 				cf_pdace++;
+				mode &= 0700;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type,
-						     0070);
+						     ppace[i]->type);
 				cf_pace->e_tag = ACL_GROUP_OBJ;
 				cf_pace->e_gid = fattr->cf_gid;
-				cf_pace->e_perm = mode;
+				cf_pace->e_perm = mode & 0007;
 				cf_pace++;
 				cf_pace->e_tag = ACL_GROUP;
 				cf_pace->e_gid = fattr->cf_gid;
-				cf_pace->e_perm = mode;
+				cf_pace->e_perm = mode & 0007;
 
 				/* default acl */
 				cf_pdace->e_tag = ACL_GROUP_OBJ;
@@ -376,24 +374,24 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				cf_pdace->e_gid = fattr->cf_gid;
 				cf_pdace->e_perm = 0;
 				cf_pdace++;
+				mode &= 0070;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 				/* set ACL_MASK ace */
 				cf_pace->e_tag = ACL_MASK;
-				cf_pace->e_perm = 0777;
+				cf_pace->e_perm = 0x07;
 				cf_pace++;
 
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type,
-						     0777);
+						     ppace[i]->type);
 				cf_pace->e_tag = ACL_OTHER;
 				cf_pace->e_perm = mode;
+				mode &= 0007;
 			} else {
 				int rc;
 				struct smb_fattr temp_fattr;
 
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type,
-						     0777);
+						     ppace[i]->type);
 				rc = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
 				if (rc) {
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
@@ -402,7 +400,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					cf_pace->e_uid = temp_fattr.cf_uid;
 				}
 				cf_pace->e_tag = ACL_USER;
-				cf_pace->e_perm = mode;
+				cf_pace->e_perm = mode & 0007;
+				mode &= 0700;
 			}
 
 			fattr->cf_mode |= mode;
