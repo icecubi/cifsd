@@ -2740,7 +2740,10 @@ int smb2_open(struct ksmbd_work *work)
 
 	fp->filename = name;
 	fp->cdoption = req->CreateDisposition;
-	fp->daccess = req->DesiredAccess;
+	if (req->DesiredAccess & GENERIC_READ) 
+		fp->daccess = GENERIC_READ_FLAGS;
+	else
+		fp->daccess = req->DesiredAccess;
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
 

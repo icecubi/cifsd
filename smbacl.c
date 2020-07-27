@@ -329,6 +329,11 @@ static int init_acl_state(struct posix_acl_state *state, int cnt)
 	return 0;
 }
 
+static void free_acl_state(struct posix_acl_state *state) {
+	kfree(state->users);
+	kfree(state->groups);
+}
+
 static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
 		struct smb_fattr *fattr)
@@ -373,8 +378,10 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		if (ret)
 			return;
 		ret = init_acl_state(&default_acl_state, num_aces);
-		if (ret)
+		if (ret) {
+			free_acl_state(&acl_state);
 			return;
+		}
 
 		/* set owner group */
 		acl_state.owner.allow = (fattr->cf_mode & 0700) >> 6;
@@ -438,14 +445,14 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 							__func__, ret);
 				} else {
-				acl_state.owner.allow = mode & 0007;
-				acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
-				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0007;
+					acl_state.owner.allow = mode & 0007;
+					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
+					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0007;
 
-				/* default acl */
-				default_acl_state.owner.allow = mode & 0007;
-				default_acl_state.users->aces[default_acl_state.users->n].uid = temp_fattr.cf_uid;
-				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0007;
+					/* default acl */
+					default_acl_state.owner.allow = mode & 0007;
+					default_acl_state.users->aces[default_acl_state.users->n].uid = temp_fattr.cf_uid;
+					default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0007;
 				}
 			}
 
@@ -486,6 +493,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 		posix_state_to_acl(&acl_state, cf_pace);
 		posix_state_to_acl(&default_acl_state, cf_pdace);
+		free_acl_state(&acl_state);
+		free_acl_state(&default_acl_state);
 	}
 }
 
@@ -533,7 +542,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	pntace = (struct smb_ace *)((char *)pnndacl + size);
 	size += setup_special_mode_ACE(pntace, mode);
 	num_aces++;
-#endif
+
 	size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
 					pownersid, flags, mode, 0700);
 	num_aces++;
@@ -543,6 +552,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
 					 &sid_everyone, flags, mode, 0007);
 	num_aces++;
+#endif
 	
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
 		goto out;
@@ -741,9 +751,23 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	pntsd->sacloffset = 0;
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
-	pntsd->type = DACL_PROTECTED | SELF_RELATIVE;
+	pntsd->type = SELF_RELATIVE;
 
-	if (addition_info == DACL_SECINFO) { 
+	if (addition_info & OWNER_SECINFO) {
+		pntsd->osidoffset = cpu_to_le32(offset);
+		owner_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
+		smb_copy_sid(owner_sid_ptr, nowner_sid_ptr);
+		offset += sizeof(struct smb_sid);
+	}
+
+	if (addition_info & GROUP_SECINFO) {
+		pntsd->gsidoffset = cpu_to_le32(offset);
+		group_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
+		smb_copy_sid(group_sid_ptr, ngroup_sid_ptr);
+		offset += sizeof(struct smb_sid);
+	}
+
+	if (addition_info & DACL_SECINFO) {
 		dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);
 		dacl_ptr->revision = cpu_to_le16(2);
 		dacl_ptr->size = 0;
@@ -752,20 +776,6 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 		set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
 		pntsd->dacloffset = cpu_to_le32(offset);
 		offset += le16_to_cpu(dacl_ptr->size);
-	}
-
-	if (addition_info == OWNER_SECINFO) {
-		pntsd->osidoffset = cpu_to_le32(offset);
-		owner_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
-		smb_copy_sid(owner_sid_ptr, nowner_sid_ptr);
-		offset += sizeof(struct smb_sid);
-	}
-
-	if (addition_info == GROUP_SECINFO) {
-		pntsd->gsidoffset = cpu_to_le32(offset);
-		group_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
-		smb_copy_sid(group_sid_ptr, ngroup_sid_ptr);
-		offset += sizeof(struct smb_sid);
 	}
 
 	*secdesclen = offset;
