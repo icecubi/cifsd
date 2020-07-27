@@ -4825,6 +4825,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	rsp->OutputBufferLength = cpu_to_le32(secdesclen);
 	inc_rfc1001_len(rsp_org, secdesclen);
 	posix_acl_release(fattr.cf_acls);
+	posix_acl_release(fattr.cf_dacls);
 
 	return 0;
 }
@@ -5616,7 +5617,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 {
 	struct smb_ntsd *pntsd = (struct smb_ntsd *)buffer;
 	struct inode *inode = FP_INODE(fp);
-	struct smb_fattr fattr;
+	struct smb_fattr fattr = {0};
 	int rc, flags;
 
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
@@ -5635,6 +5636,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	if (!rc)
 		mark_inode_dirty(inode);
 	posix_acl_release(fattr.cf_acls);
+	posix_acl_release(fattr.cf_dacls);
 	return rc;
 }
 
