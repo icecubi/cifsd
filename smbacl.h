@@ -8,6 +8,9 @@
 #ifndef _SMBACL_H
 #define _SMBACL_H
 
+#include <linux/namei.h>
+#include <linux/posix_acl.h>
+
 #define NUM_AUTHS (6)	/* number of authority fields */
 #define SID_MAX_SUB_AUTHORITIES (15) /* max number of sub authority fields */
 
@@ -114,12 +117,18 @@ struct smb_ace {
 	struct smb_sid sid; /* ie UUID of user or group who gets these perms */
 } __packed;
 
+struct smb_nt_acl {
+	int num_aces;
+	struct smb_ace *ace;
+};
+
 struct smb_fattr {
 	kuid_t	cf_uid;
 	kgid_t	cf_gid;
 	umode_t	cf_mode;
 	struct posix_acl *cf_acls;
 	struct posix_acl *cf_dacls;
+	struct smb_nt_acl nt_acl;
 };
 
 struct posix_ace_state {
@@ -159,5 +168,10 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		struct smb_fattr *fattr);
 int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 		struct smb_fattr *fattr);
+int init_acl_state(struct posix_acl_state *state, int cnt);
+void free_acl_state(struct posix_acl_state *state);
+void posix_state_to_acl(struct posix_acl_state *state,
+		struct posix_acl_entry *pace);
+int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr);
 
 #endif /* _SMBACL_H */

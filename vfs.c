@@ -31,6 +31,7 @@
 #include "buffer_pool.h"
 #include "vfs.h"
 #include "vfs_cache.h"
+#include "smbacl.h"
 
 #include "time_wrappers.h"
 #include "smb_common.h"
@@ -1952,6 +1953,29 @@ int ksmbd_vfs_xattr_stream_name(char *stream_name,
 	return 0;
 }
 
+int ksmbd_vfs_xattr_sd(char *sd_data, char **xattr_sd, size_t *xattr_sd_size)
+{
+	int sd_size;
+	char *xattr_sd_buf;
+	struct smb_nt_acl *acl = (struct smb_nt_acl *)sd_data;
+
+	sd_size = sizeof(struct smb_ace)*acl->num_aces + 4;
+	*xattr_sd_size = sd_size + XATTR_NAME_SD_LEN + 1;
+	xattr_sd_buf = kmalloc(*xattr_sd_size, GFP_KERNEL);
+	if (!xattr_sd_buf)
+		return -ENOMEM;
+
+	memcpy(xattr_sd_buf, XATTR_NAME_SD, XATTR_NAME_SD_LEN);
+
+	if (sd_size)
+		memcpy(&xattr_sd_buf[XATTR_NAME_SD_LEN], sd_data,
+				sd_size);
+
+	xattr_sd_buf[*xattr_sd_size - 1] = '\0';
+	*xattr_sd = xattr_sd_buf;
+
+	return 0;
+}
 
 static int ksmbd_vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 				struct file *file_out, loff_t pos_out,

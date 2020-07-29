@@ -8,7 +8,6 @@
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <linux/posix_acl.h>
 #include "smbacl.h"
 #include "smb_common.h"
 #include "server.h"
@@ -269,7 +268,7 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 	return rc;
 }
 
-static void posix_state_to_acl(struct posix_acl_state *state, struct posix_acl_entry *pace)
+void posix_state_to_acl(struct posix_acl_state *state, struct posix_acl_entry *pace)
 {
 		int i;
 
@@ -305,7 +304,7 @@ static void posix_state_to_acl(struct posix_acl_state *state, struct posix_acl_e
 		pace->e_perm = state->other.allow;
 }
 
-static int init_acl_state(struct posix_acl_state *state, int cnt)
+int init_acl_state(struct posix_acl_state *state, int cnt)
 {
 	int alloc;
 
@@ -329,7 +328,8 @@ static int init_acl_state(struct posix_acl_state *state, int cnt)
 	return 0;
 }
 
-static void free_acl_state(struct posix_acl_state *state) {
+void free_acl_state(struct posix_acl_state *state)
+{
 	kfree(state->users);
 	kfree(state->groups);
 }
@@ -346,6 +346,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	struct posix_acl_entry *cf_pace, *cf_pdace;
 	struct posix_acl_state acl_state, default_acl_state;
 	umode_t mode;
+	struct smb_nt_acl *nt_acl = &fattr->nt_acl;
 
 	/* BB need to add parm so we can store the SID BB */
 
@@ -367,7 +368,15 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 	num_aces = le32_to_cpu(pdacl->num_aces);
 	if (num_aces > 0) {
+		struct smb_ace *nt_aces;
+
 		if (num_aces > ULONG_MAX / sizeof(struct smb_ace *))
+			return;
+
+		nt_acl->num_aces = num_aces;
+		nt_aces = kmalloc_array(num_aces, sizeof(struct smb_ace *),
+				      GFP_KERNEL);
+		if (!nt_aces)
 			return;
 		ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
 				      GFP_KERNEL);
@@ -401,6 +410,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
+			memcpy(nt_aces, ppace[i], sizeof(struct smb_ace));
 
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
@@ -469,6 +479,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			default_acl_state.mask.allow = 0x07;
 
 		kfree(ppace);
+
+		nt_acl->ace = nt_aces;
 
 		/*
 		 * When there are no effective ACEs, the following will end
@@ -553,7 +565,22 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 					 &sid_everyone, flags, mode, 0007);
 	num_aces++;
 #endif
-	
+
+	if (fattr->nt_acl.num_aces) {
+		struct smb_ace *ace;
+
+		ace = fattr->nt_acl.ace;
+		for (i = 0; i < fattr->nt_acl.num_aces; i++) {
+			memcpy((char *)pnndacl + size, ace, ace->size);
+
+			size += ace->size;
+			ace++;
+			num_aces++;
+		}
+
+		goto out;
+	}
+
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
 		goto out;
 
@@ -781,3 +808,52 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	*secdesclen = offset;
 	return rc;
 }
+
+int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
+{
+	int num_aces = 3;
+	struct smb_ace *pace;
+	struct smb_nt_acl *acl = &fattr->nt_acl;
+	__u32 access_req;
+
+	acl->num_aces = num_aces;
+	pace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
+		GFP_KERNEL);
+	if (!pace)
+		return -ENOMEM;
+
+	acl->ace = pace;
+
+	/* owner RID */
+	pace->type = ACCESS_ALLOWED;
+	pace->flags = 0;
+	pace->access_req = owner_daccess;
+
+	smb_copy_sid(&pace->sid, &cifsd_domain);
+	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);
+	pace->sid.num_subauth++;
+	pace++;
+
+	/* Domain users */
+	pace->type = ACCESS_ALLOWED;
+	pace->flags = 0;
+	mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
+	if (!access_req)
+		access_req = SET_MINIMUM_RIGHTS;
+	pace->access_req = access_req;
+
+	smb_copy_sid(&pace->sid, &cifsd_domain);
+	pace->sid.sub_auth[pace->sid.num_subauth] = 513;
+	pace->sid.num_subauth++;
+	pace++;
+
+	/* other */
+	pace->type = ACCESS_ALLOWED;
+	pace->flags = 0;
+	mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
+	if (!access_req)
+		access_req = SET_MINIMUM_RIGHTS;
+	pace->access_req = access_req;
+	smb_copy_sid(&pace->sid, &sid_everyone);
+	return 0;
+}	
