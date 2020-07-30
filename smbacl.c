@@ -2,7 +2,7 @@
 /*
  *   Copyright (C) International Business Machines  Corp., 2007,2008
  *   Author(s): Steve French (sfrench@us.ibm.com)
- *   Modified by Namjae Jeon <linkinjeon@kernel.org>
+ *   Copyright (C) 2020 Namjae Jeon <linkinjeon@kernel.org>
  */
 
 #include <linux/fs.h>
@@ -346,7 +346,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	struct posix_acl_entry *cf_pace, *cf_pdace;
 	struct posix_acl_state acl_state, default_acl_state;
 	umode_t mode;
-	struct smb_nt_acl *nt_acl = &fattr->nt_acl;
 
 	/* BB need to add parm so we can store the SID BB */
 
@@ -368,16 +367,20 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 	num_aces = le32_to_cpu(pdacl->num_aces);
 	if (num_aces > 0) {
-		struct smb_ace *nt_aces;
+		int total_ace_size; 
 
 		if (num_aces > ULONG_MAX / sizeof(struct smb_ace *))
 			return;
 
-		nt_acl->num_aces = num_aces;
-		nt_aces = kmalloc_array(num_aces, sizeof(struct smb_ace *),
-				      GFP_KERNEL);
-		if (!nt_aces)
+		total_ace_size = le16_to_cpu(pdacl->size) - acl_size;
+		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) +
+				total_ace_size, GFP_KERNEL);
+		if (!fattr->nt_acl)
 			return;
+		fattr->nt_acl->num_aces = num_aces;
+		fattr->nt_acl->size = le16_to_cpu(pdacl->size);
+		memcpy(fattr->nt_acl->ace, acl_base, total_ace_size);
+
 		ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
 				      GFP_KERNEL);
 		if (!ppace)
@@ -410,7 +413,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
-			memcpy(nt_aces, ppace[i], sizeof(struct smb_ace));
 
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
@@ -479,8 +481,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			default_acl_state.mask.allow = 0x07;
 
 		kfree(ppace);
-
-		nt_acl->ace = nt_aces;
 
 		/*
 		 * When there are no effective ACEs, the following will end
@@ -566,11 +566,11 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	num_aces++;
 #endif
 
-	if (fattr->nt_acl.num_aces) {
+	if (fattr->nt_acl->num_aces) {
 		struct smb_ace *ace;
 
-		ace = fattr->nt_acl.ace;
-		for (i = 0; i < fattr->nt_acl.num_aces; i++) {
+		ace = fattr->nt_acl->ace;
+		for (i = 0; i < fattr->nt_acl->num_aces; i++) {
 			memcpy((char *)pnndacl + size, ace, ace->size);
 
 			size += ace->size;
@@ -813,16 +813,18 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 {
 	int num_aces = 3;
 	struct smb_ace *pace;
-	struct smb_nt_acl *acl = &fattr->nt_acl;
 	__u32 access_req;
 
-	acl->num_aces = num_aces;
-	pace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
+	fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl),
+		GFP_KERNEL);
+	if (!fattr->nt_acl)
+		return -ENOMEM;
+	fattr->nt_acl->num_aces = num_aces;
+
+	pace = kmalloc_array(num_aces, sizeof(struct smb_ace),
 		GFP_KERNEL);
 	if (!pace)
 		return -ENOMEM;
-
-	acl->ace = pace;
 
 	/* owner RID */
 	pace->type = ACCESS_ALLOWED;
@@ -832,7 +834,9 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	smb_copy_sid(&pace->sid, &cifsd_domain);
 	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);
 	pace->sid.num_subauth++;
-	pace++;
+	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+	fattr->nt_acl->size = pace->size + 8;
+	pace = (struct smb_ace *)((char *)pace + pace->size);
 
 	/* Domain users */
 	pace->type = ACCESS_ALLOWED;
@@ -845,7 +849,9 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	smb_copy_sid(&pace->sid, &cifsd_domain);
 	pace->sid.sub_auth[pace->sid.num_subauth] = 513;
 	pace->sid.num_subauth++;
-	pace++;
+	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+	fattr->nt_acl->size += pace->size;
+	pace = (struct smb_ace *)((char *)pace + pace->size);
 
 	/* other */
 	pace->type = ACCESS_ALLOWED;
@@ -855,5 +861,7 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 		access_req = SET_MINIMUM_RIGHTS;
 	pace->access_req = access_req;
 	smb_copy_sid(&pace->sid, &sid_everyone);
+	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+	fattr->nt_acl->size += pace->size;
 	return 0;
 }	

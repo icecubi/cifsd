@@ -118,8 +118,9 @@ struct smb_ace {
 } __packed;
 
 struct smb_nt_acl {
+	int size;
 	int num_aces;
-	struct smb_ace *ace;
+	struct smb_ace ace[];
 };
 
 struct smb_fattr {
@@ -128,7 +129,7 @@ struct smb_fattr {
 	umode_t	cf_mode;
 	struct posix_acl *cf_acls;
 	struct posix_acl *cf_dacls;
-	struct smb_nt_acl nt_acl;
+	struct smb_nt_acl *nt_acl;
 };
 
 struct posix_ace_state {

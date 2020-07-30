@@ -39,7 +39,6 @@
 /* SECURITY DESCRIPTOR XATTR PREFIX */
 #define SD_PREFIX			"sd."
 #define SD_PREFIX_LEN	(sizeof(SD_PREFIX) - 1)
-#define SD_LEN		(sizeof(struct ))
 #define XATTR_NAME_SD	\
 		(XATTR_USER_PREFIX SD_PREFIX)
 #define XATTR_NAME_SD_LEN	\
