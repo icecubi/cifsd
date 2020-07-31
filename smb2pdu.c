@@ -2177,23 +2177,24 @@ static noinline int smb2_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int 
 	return 0;
 }
 
-static noinline int smb2_get_sd_xattr(struct ksmbd_file *fp, char *sd_data)
+static noinline struct smb_nt_acl *smb2_get_sd_xattr(struct ksmbd_file *fp)
 {
 	struct dentry *dentry = fp->filp->f_path.dentry;
-	char *attr = NULL;
+	char *attr = NULL, *sd_data = NULL;
 	int rc;
 
 	rc = ksmbd_vfs_getxattr(dentry, XATTR_NAME_SD, &attr);
+	ksmbd_err("rc : %d\n", rc);
 	if (rc > 0) {
 		sd_data = kzalloc(rc, GFP_KERNEL);
 		if (!sd_data)
-			return -ENOMEM;
+			return NULL;
 
 		memcpy(sd_data, attr, rc);
 	}
 
 	ksmbd_free(attr);
-	return 0;
+	return (struct smb_nt_acl *)sd_data;
 }
 
 static int smb2_remove_smb_xattrs(struct dentry *dentry)
@@ -2988,7 +2989,7 @@ int smb2_open(struct ksmbd_work *work)
 		fattr.cf_mode = inode->i_mode;
 		
 		smb2_set_default_nt_acl(fp->daccess, &fattr);
-		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size);
+		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
 		if (S_ISDIR(inode->i_mode)) {
@@ -3010,9 +3011,7 @@ int smb2_open(struct ksmbd_work *work)
 
 			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, dacls);
 			// write xattr nacl
-
 		}
-		ksmbd_err("rc : %d\n", rc);
 	}
 
 	memcpy(fp->client_guid, conn->ClientGUID, SMB2_CLIENT_GUID_SIZE);
@@ -4952,18 +4951,19 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	fattr.cf_dacls = NULL;
 
 	// read xattr nacl
-
 	fattr.cf_acls = get_acl(inode, ACL_TYPE_ACCESS);
 	if (S_ISDIR(inode->i_mode))
 		fattr.cf_dacls = get_acl(inode, ACL_TYPE_DEFAULT);
 
-	rc = smb2_get_sd_xattr(fp, (char *)fattr.nt_acl);
-	if (rc)
-		fattr.nt_acl->num_aces = 0;
-
+	fattr.nt_acl = smb2_get_sd_xattr(fp);
+	if (!fattr.nt_acl) {
+		ksmbd_err("faild to load nt acl data\n");
+		return -ENOMEM;
+	}
 	rc = build_sec_desc(pntsd, addition_info, &secdesclen, &fattr);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
+	kfree(fattr.nt_acl);
 	ksmbd_fd_put(work, fp);
 	if (rc)
 		return rc;
@@ -5777,7 +5777,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 
 	// write xattr nacl
-	smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size);
+	smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 
 	if (!rc)
 		mark_inode_dirty(inode);

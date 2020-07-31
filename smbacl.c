@@ -550,22 +550,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	int flags = 0;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
-#if 0
-	pntace = (struct smb_ace *)((char *)pnndacl + size);
-	size += setup_special_mode_ACE(pntace, mode);
-	num_aces++;
-
-	size += fill_ace_for_sid((struct smb_ace *) ((char *)pnndacl + size),
-					pownersid, flags, mode, 0700);
-	num_aces++;
-	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
-					pgrpsid, flags, mode, 0070);
-	num_aces++;
-	size += fill_ace_for_sid((struct smb_ace *)((char *)pnndacl + size),
-					 &sid_everyone, flags, mode, 0007);
-	num_aces++;
-#endif
-
+	
 	if (fattr->nt_acl->num_aces) {
 		struct smb_ace *ace;
 
@@ -574,7 +559,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			memcpy((char *)pnndacl + size, ace, ace->size);
 
 			size += ace->size;
-			ace++;
+			ace = (struct smb_ace *)((char *)ace + ace->size);
 			num_aces++;
 		}
 
@@ -814,19 +799,21 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	int num_aces = 3;
 	struct smb_ace *pace;
 	__u32 access_req;
+	char *pace_base;
 
-	fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl),
+	fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + num_aces * sizeof(struct smb_ace),
 		GFP_KERNEL);
 	if (!fattr->nt_acl)
 		return -ENOMEM;
 	fattr->nt_acl->num_aces = num_aces;
 
-	pace = kmalloc_array(num_aces, sizeof(struct smb_ace),
+	pace_base = kmalloc_array(num_aces, sizeof(struct smb_ace),
 		GFP_KERNEL);
-	if (!pace)
+	if (!pace_base)
 		return -ENOMEM;
 
 	/* owner RID */
+	pace = (struct smb_ace *)pace_base;
 	pace->type = ACCESS_ALLOWED;
 	pace->flags = 0;
 	pace->access_req = owner_daccess;
@@ -835,10 +822,10 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);
 	pace->sid.num_subauth++;
 	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
-	fattr->nt_acl->size = pace->size + 8;
-	pace = (struct smb_ace *)((char *)pace + pace->size);
+	fattr->nt_acl->size = pace->size;
 
 	/* Domain users */
+	pace = (struct smb_ace *)((char *)pace + pace->size);
 	pace->type = ACCESS_ALLOWED;
 	pace->flags = 0;
 	mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
@@ -851,9 +838,9 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	pace->sid.num_subauth++;
 	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
 	fattr->nt_acl->size += pace->size;
-	pace = (struct smb_ace *)((char *)pace + pace->size);
 
 	/* other */
+	pace = (struct smb_ace *)((char *)pace + pace->size);
 	pace->type = ACCESS_ALLOWED;
 	pace->flags = 0;
 	mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
@@ -863,5 +850,8 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	smb_copy_sid(&pace->sid, &sid_everyone);
 	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
 	fattr->nt_acl->size += pace->size;
+
+	memcpy(fattr->nt_acl->ace, pace_base, fattr->nt_acl->size);
+
 	return 0;
 }	
