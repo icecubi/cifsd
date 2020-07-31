@@ -2356,26 +2356,6 @@ static int smb2_creat(struct ksmbd_work *work,
 	return 0;
 }
 
-static void smb2_set_desired_access(struct ksmbd_file *fp, __le32 daccess)
-{
-	switch (daccess) {
-	case FILE_GENERIC_READ_LE:
-		fp->daccess = GENERIC_READ_FLAGS; 
-		break;
-	case FILE_GENERIC_WRITE_LE:
-		fp->daccess = GENERIC_WRITE_FLAGS; 
-		break;
-	case FILE_GENERIC_EXECUTE_LE:
-		fp->daccess = GENERIC_EXECUTE_FLAGS; 
-		break;
-	case FILE_GENERIC_ALL_LE:
-		fp->daccess = GENERIC_ALL_FLAGS; 
-		break;
-	default:
-		fp->daccess = daccess;
-	}
-}
-
 /**
  * smb2_open() - handler for smb file open request
  * @work:	smb work containing request buffer
@@ -2825,7 +2805,7 @@ int smb2_open(struct ksmbd_work *work)
 
 	fp->filename = name;
 	fp->cdoption = req->CreateDisposition;
-	smb2_set_desired_access(fp, req->DesiredAccess);
+	fp->daccess = set_desired_access(req->DesiredAccess);
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
 
@@ -2960,7 +2940,7 @@ int smb2_open(struct ksmbd_work *work)
 		smb2_new_xattrs(tcon, &path, fp);
 
 	/* Write acls */
-	if (req->DesiredAccess & FILE_WRITE_OWNER_LE) {
+	if (created && req->DesiredAccess & FILE_WRITE_OWNER_LE) {
 		struct posix_acl_state acl_state;
 		struct posix_acl *acls;
 		struct inode *inode = FP_INODE(fp);
@@ -5763,13 +5743,18 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	struct smb_fattr fattr = {0};
 	int rc, flags;
 
+	fattr.cf_uid = INVALID_UID;
+	fattr.cf_gid = INVALID_GID;
+
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
 
 	inode->i_mode |= fattr.cf_mode & 07777;
-	inode->i_uid = fattr.cf_uid;
-	inode->i_gid = fattr.cf_gid;
+	if (!uid_eq(fattr.cf_uid, INVALID_UID))
+		inode->i_uid = fattr.cf_uid;
+	if (!gid_eq(fattr.cf_gid, INVALID_GID))
+		inode->i_gid = fattr.cf_gid;
 
 	//set acls
 	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);

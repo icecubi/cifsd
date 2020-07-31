@@ -11,6 +11,7 @@
 #include "smbacl.h"
 #include "smb_common.h"
 #include "server.h"
+#include "misc.h"
 
 static const struct smb_sid cifsd_domain = {1, 4, {0, 0, 0, 0, 0, 5},
 	{cpu_to_le32(21),
@@ -252,17 +253,21 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		uid_t id;
 
 		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
-		uid = make_kuid(&init_user_ns, id);
-		if (uid_valid(uid))
-			fattr->cf_uid = uid;
+		if (id > 0) {
+			uid = make_kuid(&init_user_ns, id);
+			if (uid_valid(uid))
+				fattr->cf_uid = uid;
+		}
 	} else {
 		kgid_t gid;
 		gid_t id;
 		
 		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
-		gid = make_kgid(&init_user_ns, id);
-		if (gid_valid(gid))
-			fattr->cf_gid = gid;
+		if (id > 0) {
+			gid = make_kgid(&init_user_ns, id);
+			if (gid_valid(gid))
+				fattr->cf_gid = gid;
+		}
 	}
 
 	return rc;
@@ -367,7 +372,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 	num_aces = le32_to_cpu(pdacl->num_aces);
 	if (num_aces > 0) {
-		int total_ace_size; 
+		int total_ace_size;
+		struct smb_ace *ace;
 
 		if (num_aces > ULONG_MAX / sizeof(struct smb_ace *))
 			return;
@@ -379,7 +385,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			return;
 		fattr->nt_acl->num_aces = num_aces;
 		fattr->nt_acl->size = le16_to_cpu(pdacl->size);
-		memcpy(fattr->nt_acl->ace, acl_base, total_ace_size);
 
 		ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
 				      GFP_KERNEL);
@@ -410,9 +415,13 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		 * user/group/other have no permissions
 		 */
 		fattr->cf_mode &= ~(0777);
-
+		ace = fattr->nt_acl->ace;
 		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
+
+			memcpy(ace, ppace[i], ppace[i]->size);
+			ace->access_req = set_desired_access(ppace[i]->access_req);
+			ace = (struct smb_ace *)((char *)ace + ppace[i]->size);
 
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
@@ -452,8 +461,9 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
+				temp_fattr.cf_uid = INVALID_UID;
 				ret = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
-				if (ret) {
+				if (ret || uid_eq(temp_fattr.cf_uid, INVALID_UID)) {
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 							__func__, ret);
 				} else {
@@ -510,40 +520,12 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 	}
 }
 
-/*
- * Fill in the special SID based on the mode. See
- * http://technet.microsoft.com/en-us/library/hh509017(v=ws.10).aspx
- */
-static unsigned int setup_special_mode_ACE(struct smb_ace *pntace, umode_t mode)
-{
-	int i;
-	unsigned int ace_size = 28;
-
-	pntace->type = ACCESS_DENIED_ACE_TYPE;
-	pntace->flags = 0x0;
-	pntace->access_req = 0;
-	pntace->sid.num_subauth = 3;
-	pntace->sid.revision = 1;
-	for (i = 0; i < NUM_AUTHS; i++)
-		pntace->sid.authority[i] = sid_unix_NFS_mode.authority[i];
-
-	pntace->sid.sub_auth[0] = sid_unix_NFS_mode.sub_auth[0];
-	pntace->sid.sub_auth[1] = sid_unix_NFS_mode.sub_auth[1];
-	pntace->sid.sub_auth[2] = cpu_to_le32(mode);
-
-	/* size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (psid->num_subauth*4) */
-	pntace->size = cpu_to_le16(ace_size);
-	return ace_size;
-}
-
 static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 		const struct smb_sid *pgrpsid, struct smb_fattr *fattr)
 {
 	u16 size = 0;
 	u32 num_aces = 0;
 	struct smb_acl *pnndacl;
-	struct smb_ace *pntace;
-	umode_t mode = fattr->cf_mode;
 	struct posix_acl_entry *pace;
 	struct smb_sid *sid;
 	int i;
@@ -693,29 +675,34 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		 le32_to_cpu(pntsd->gsidoffset),
 		 le32_to_cpu(pntsd->sacloffset), dacloffset);
 
-	rc = parse_sid(owner_sid_ptr, end_of_acl);
-	if (rc) {
-		ksmbd_err("%s: Error %d parsing Owner SID\n", __func__, rc);
-		return rc;
-	}
-	rc = sid_to_id(owner_sid_ptr, SIDOWNER, fattr);
-	if (rc) {
-		ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
-				__func__, rc);
-		return rc;
+	if (pntsd->osidoffset) {
+		rc = parse_sid(owner_sid_ptr, end_of_acl);
+		if (rc) {
+			ksmbd_err("%s: Error %d parsing Owner SID\n", __func__, rc);
+			return rc;
+		}
+
+		rc = sid_to_id(owner_sid_ptr, SIDOWNER, fattr);
+		if (rc) {
+			ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
+					__func__, rc);
+			return rc;
+		}
 	}
 
-	rc = parse_sid(group_sid_ptr, end_of_acl);
-	if (rc) {
-		ksmbd_err("%s: Error %d mapping Owner SID to gid\n",
-				__func__, rc);
-		return rc;
-	}
-	rc = sid_to_id(group_sid_ptr, SIDGROUP, fattr);
-	if (rc) {
-		ksmbd_err("%s: Error %d mapping Group SID to gid\n",
-				__func__, rc);
-		return rc;
+	if (pntsd->gsidoffset) {
+		rc = parse_sid(group_sid_ptr, end_of_acl);
+		if (rc) {
+			ksmbd_err("%s: Error %d mapping Owner SID to gid\n",
+					__func__, rc);
+			return rc;
+		}
+		rc = sid_to_id(group_sid_ptr, SIDGROUP, fattr);
+		if (rc) {
+			ksmbd_err("%s: Error %d mapping Group SID to gid\n",
+					__func__, rc);
+			return rc;
+		}
 	}
 
 	if (dacloffset)
@@ -769,14 +756,14 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 		pntsd->osidoffset = cpu_to_le32(offset);
 		owner_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
 		smb_copy_sid(owner_sid_ptr, nowner_sid_ptr);
-		offset += sizeof(struct smb_sid);
+		offset += 1 + 1 + 6 + (nowner_sid_ptr->num_subauth * 4);
 	}
 
 	if (addition_info & GROUP_SECINFO) {
 		pntsd->gsidoffset = cpu_to_le32(offset);
 		group_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
 		smb_copy_sid(group_sid_ptr, ngroup_sid_ptr);
-		offset += sizeof(struct smb_sid);
+		offset += 1 + 1 + 6 + (ngroup_sid_ptr->num_subauth * 4);
 	}
 
 	if (addition_info & DACL_SECINFO) {

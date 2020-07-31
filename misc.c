@@ -304,3 +304,28 @@ char *ksmbd_convert_dir_info_name(struct ksmbd_dir_info *d_info,
 	conv[*conv_len + 1] = 0x00;
 	return conv;
 }
+
+__le32 set_desired_access(__le32 daccess)
+{
+	if (daccess & FILE_GENERIC_READ_LE) {
+		daccess |= cpu_to_le32(GENERIC_READ_FLAGS);
+		daccess &= ~FILE_GENERIC_READ_LE;
+	}
+
+	if (daccess & FILE_GENERIC_WRITE_LE) {
+		daccess |= cpu_to_le32(GENERIC_WRITE_FLAGS);
+		daccess &= ~FILE_GENERIC_WRITE_LE;
+	}
+
+	if (daccess & FILE_GENERIC_EXECUTE_LE) {
+		daccess |= cpu_to_le32(GENERIC_EXECUTE_FLAGS);
+		daccess &= ~FILE_GENERIC_EXECUTE_LE;
+	}
+
+	if (daccess & FILE_GENERIC_ALL_LE) {
+		daccess |= cpu_to_le32(GENERIC_ALL_FLAGS);
+		daccess &= ~FILE_GENERIC_ALL_LE;
+	}
+
+	return daccess;
+}
