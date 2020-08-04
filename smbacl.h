@@ -127,6 +127,7 @@ struct smb_fattr {
 	kuid_t	cf_uid;
 	kgid_t	cf_gid;
 	umode_t	cf_mode;
+	__le32 daccess;
 	struct posix_acl *cf_acls;
 	struct posix_acl *cf_dacls;
 	struct smb_nt_acl *nt_acl;
@@ -173,6 +174,6 @@ int init_acl_state(struct posix_acl_state *state, int cnt);
 void free_acl_state(struct posix_acl_state *state);
 void posix_state_to_acl(struct posix_acl_state *state,
 		struct posix_acl_entry *pace);
-int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr);
+int smb2_set_default_nt_acl(struct smb_fattr *fattr);
 
 #endif /* _SMBACL_H */

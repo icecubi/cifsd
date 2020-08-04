@@ -561,8 +561,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 
 		if (!(prev_fp->saccess & (FILE_SHARE_DELETE_LE)) &&
 				curr_fp->daccess & (FILE_DELETE_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE)) {
+					FILE_GENERIC_ALL_LE)) {
 			smb_shared_mode_error(SHARE_DELETE_ERROR,
 					      prev_fp,
 					      curr_fp);
@@ -581,8 +580,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 				curr_fp->daccess & (FILE_EXECUTE_LE |
 					FILE_READ_DATA_LE |
 					FILE_GENERIC_READ_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE)) {
+					FILE_GENERIC_ALL_LE)) {
 			smb_shared_mode_error(SHARE_READ_ERROR,
 					      prev_fp,
 					      curr_fp);
@@ -594,8 +592,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 				curr_fp->daccess & (FILE_WRITE_DATA_LE |
 					FILE_APPEND_DATA_LE |
 					FILE_GENERIC_WRITE_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE)) {
+					FILE_GENERIC_ALL_LE)) {
 			smb_shared_mode_error(SHARE_WRITE_ERROR,
 					      prev_fp,
 					      curr_fp);
@@ -606,8 +603,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 		if (prev_fp->daccess & (FILE_EXECUTE_LE |
 					FILE_READ_DATA_LE |
 					FILE_GENERIC_READ_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE) &&
+					FILE_GENERIC_ALL_LE) &&
 				!(curr_fp->saccess & FILE_SHARE_READ_LE)) {
 			smb_shared_mode_error(FILE_READ_ERROR,
 					      prev_fp,
@@ -619,8 +615,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 		if (prev_fp->daccess & (FILE_WRITE_DATA_LE |
 					FILE_APPEND_DATA_LE |
 					FILE_GENERIC_WRITE_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE) &&
+					FILE_GENERIC_ALL_LE) &&
 				!(curr_fp->saccess & FILE_SHARE_WRITE_LE)) {
 			smb_shared_mode_error(FILE_WRITE_ERROR,
 					      prev_fp,
@@ -630,8 +625,7 @@ int ksmbd_smb_check_shared_mode(struct file *filp, struct ksmbd_file *curr_fp)
 		}
 
 		if (prev_fp->daccess & (FILE_DELETE_LE |
-					FILE_GENERIC_ALL_LE |
-					FILE_MAXIMAL_ACCESS_LE) &&
+					FILE_GENERIC_ALL_LE) &&
 				!(curr_fp->saccess & FILE_SHARE_DELETE_LE)) {
 			smb_shared_mode_error(FILE_DELETE_ERROR,
 					      prev_fp,
@@ -693,6 +687,9 @@ int ksmbd_override_fsids(struct ksmbd_work *work)
 
 void ksmbd_revert_fsids(struct ksmbd_work *work)
 {
+	if (!work->saved_cred_level)
+		return;
+
 	work->saved_cred_level--;
 	WARN_ON(work->saved_cred_level < 0);
 	if (!work->saved_cred_level) {

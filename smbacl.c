@@ -421,7 +421,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 			memcpy(ace, ppace[i], ppace[i]->size);
 			ace->access_req = set_desired_access(ppace[i]->access_req);
-			ace = (struct smb_ace *)((char *)ace + ppace[i]->size);
 
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
@@ -431,15 +430,16 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
-				acl_state.owner.allow = mode & 0007;
+				acl_state.owner.allow = mode & 0700;
+				fattr->daccess = ace->access_req;
 				acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
-				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0007;
+				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700;
 
 				/* default acl */
-				default_acl_state.owner.allow = mode & 0007;
+				default_acl_state.owner.allow = mode & 0700;
 				default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
-				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0007;
-				mode &= 0007;
+				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700;
+				mode &= 0700;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
@@ -467,14 +467,14 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 							__func__, ret);
 				} else {
-					acl_state.owner.allow = mode & 0007;
+					acl_state.owner.allow = mode & 0700;
 					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
-					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0007;
+					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700;
 
 					/* default acl */
-					default_acl_state.owner.allow = mode & 0007;
+					default_acl_state.owner.allow = mode & 0700;
 					default_acl_state.users->aces[default_acl_state.users->n].uid = temp_fattr.cf_uid;
-					default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0007;
+					default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700;
 				}
 			}
 
@@ -482,6 +482,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 			acl_base = (char *)ppace[i];
 			acl_size = le16_to_cpu(ppace[i]->size);
+			ace = (struct smb_ace *)((char *)ace + ppace[i]->size);
 		}
 
 		if (acl_state.users->n || acl_state.users->n)
@@ -567,8 +568,10 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDGROUP, sid);
-		} else
+		} else {
+			kfree(sid);
 			continue;
+		}
 
 		if (fattr->cf_dacls)
 			flags = 0x03;
@@ -603,9 +606,10 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 		} else if (pace->e_tag == ACL_OTHER) {
 
 			smb_copy_sid(sid, &sid_everyone);
-		} else
+		} else {
+			kfree(sid);
 			continue;
-
+		}
 		size += fill_ace_for_sid(
 			(struct smb_ace *) ((char *)pnndacl + size),
 				sid, flags, pace->e_perm, 0777);
@@ -781,7 +785,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	return rc;
 }
 
-int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
+int smb2_set_default_nt_acl(struct smb_fattr *fattr)
 {
 	int num_aces = 3;
 	struct smb_ace *pace;
@@ -803,7 +807,10 @@ int smb2_set_default_nt_acl(int owner_daccess, struct smb_fattr *fattr)
 	pace = (struct smb_ace *)pace_base;
 	pace->type = ACCESS_ALLOWED;
 	pace->flags = 0;
-	pace->access_req = owner_daccess;
+	mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
+	if (!access_req)
+		access_req = SET_MINIMUM_RIGHTS;
+	pace->access_req = access_req;
 
 	smb_copy_sid(&pace->sid, &cifsd_domain);
 	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);

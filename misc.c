@@ -327,5 +327,10 @@ __le32 set_desired_access(__le32 daccess)
 		daccess &= ~FILE_GENERIC_ALL_LE;
 	}
 
+	if (daccess & FILE_MAXIMAL_ACCESS_LE) {
+		daccess |= GENERIC_ALL_FLAGS;
+		daccess &= ~FILE_MAXIMAL_ACCESS_LE;
+	}
+
 	return daccess;
 }

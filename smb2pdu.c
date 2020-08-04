@@ -2184,7 +2184,6 @@ static noinline struct smb_nt_acl *smb2_get_sd_xattr(struct ksmbd_file *fp)
 	int rc;
 
 	rc = ksmbd_vfs_getxattr(dentry, XATTR_NAME_SD, &attr);
-	ksmbd_err("rc : %d\n", rc);
 	if (rc > 0) {
 		sd_data = kzalloc(rc, GFP_KERNEL);
 		if (!sd_data)
@@ -2390,7 +2389,7 @@ int smb2_open(struct ksmbd_work *work)
 	char *stream_name = NULL;
 	bool file_present = false, created = false;
 	struct durable_info d_info;
-	int share_ret, need_truncate = 0;
+	int share_ret = 0, need_truncate = 0;
 	u64 time;
 	umode_t posix_mode = 0;
 
@@ -2615,7 +2614,7 @@ int smb2_open(struct ksmbd_work *work)
 		}
 	}
 
-	if (ksmbd_override_fsids(work)) {
+	if (!(req->DesiredAccess & FILE_MAXIMAL_ACCESS_LE) && ksmbd_override_fsids(work)) {
 		rc = -ENOMEM;
 		goto err_out1;
 	}
@@ -2806,6 +2805,8 @@ int smb2_open(struct ksmbd_work *work)
 	fp->filename = name;
 	fp->cdoption = req->CreateDisposition;
 	fp->daccess = set_desired_access(req->DesiredAccess);
+	if (fp->f_ci->daccess)
+		fp->daccess = fp->f_ci->daccess & fp->daccess;
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
 
@@ -2842,7 +2843,8 @@ int smb2_open(struct ksmbd_work *work)
 		goto err_out;
 	}
 
-	share_ret = ksmbd_smb_check_shared_mode(fp->filp, fp);
+	if (!(req->DesiredAccess & FILE_MAXIMAL_ACCESS_LE))
+		share_ret = ksmbd_smb_check_shared_mode(fp->filp, fp);
 	if (!test_share_config_flag(work->tcon->share_conf,
 			KSMBD_SHARE_FLAG_OPLOCKS) ||
 		(req_op_level == SMB2_OPLOCK_LEVEL_LEASE &&
@@ -2962,16 +2964,17 @@ int smb2_open(struct ksmbd_work *work)
 
 		posix_state_to_acl(&acl_state, acls->a_entries);
 		free_acl_state(&acl_state);
-
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
 		// write xattr nacl
 		fattr.cf_uid = inode->i_uid;
 		fattr.cf_gid = inode->i_gid;
 		fattr.cf_mode = inode->i_mode;
-		
-		smb2_set_default_nt_acl(fp->daccess, &fattr);
-		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 
-		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
+		smb2_set_default_nt_acl(&fattr);
+		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+		kfree(fattr.nt_acl);
+		posix_acl_release(acls);
+
 		if (S_ISDIR(inode->i_mode)) {
 			struct posix_acl_state default_acl_state;
 			struct posix_acl *dacls;
@@ -2979,19 +2982,20 @@ int smb2_open(struct ksmbd_work *work)
 			default_acl_state.owner.allow = inode->i_mode;
 			default_acl_state.group.allow = 0;
 			default_acl_state.other.allow = 0;
-		default_acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
-		default_acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
-		default_acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
-		default_acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
-
+			default_acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
+			default_acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
+			default_acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
+			default_acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
 			default_acl_state.mask.allow = 0x07;
 			dacls = posix_acl_alloc(3, GFP_KERNEL);
 			posix_state_to_acl(&default_acl_state, dacls->a_entries);
 			free_acl_state(&default_acl_state);
 
 			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, dacls);
+			posix_acl_release(dacls);
 			// write xattr nacl
 		}
+		rc = 0;
 	}
 
 	memcpy(fp->client_guid, conn->ClientGUID, SMB2_CLIENT_GUID_SIZE);
@@ -5741,7 +5745,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	struct smb_ntsd *pntsd = (struct smb_ntsd *)buffer;
 	struct inode *inode = FP_INODE(fp);
 	struct smb_fattr fattr = {0};
-	int rc, flags;
+	int rc;
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
@@ -5768,6 +5772,12 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		mark_inode_dirty(inode);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
+	kfree(fattr.nt_acl);
+
+	if (fattr.daccess)
+		fp->f_ci->daccess = fattr.daccess;
+	fp->f_ci->daccess |= FILE_READ_ATTRIBUTES_LE | FILE_DELETE_LE |
+		FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE;
 	return rc;
 }
 
