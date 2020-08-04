@@ -2948,7 +2948,7 @@ int smb2_open(struct ksmbd_work *work)
 		struct inode *inode = FP_INODE(fp);
 		struct smb_fattr fattr;
 
-		init_acl_state(&acl_state, 1);
+		init_acl_state(&acl_state, 3);
 
 		/* set owner group */
 		acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
@@ -2979,6 +2979,7 @@ int smb2_open(struct ksmbd_work *work)
 			struct posix_acl_state default_acl_state;
 			struct posix_acl *dacls;
 
+			init_acl_state(&default_acl_state, 3);
 			default_acl_state.owner.allow = inode->i_mode;
 			default_acl_state.group.allow = 0;
 			default_acl_state.other.allow = 0;
