@@ -67,7 +67,7 @@ struct ksmbd_inode {
 	struct list_head		m_op_list;
 	struct oplock_info		*m_opinfo;
 	__le32				m_fattr;
-	__le32				daccess;
+	__le32				m_daccess;
 
 };
 

@@ -35,5 +35,4 @@ struct ksmbd_dir_info;
 char *ksmbd_convert_dir_info_name(struct ksmbd_dir_info *d_info,
 				  const struct nls_table *local_nls,
 				  int *conv_len);
-__le32 set_desired_access(__le32 daccess);
 #endif /* __KSMBD_MISC_H__ */

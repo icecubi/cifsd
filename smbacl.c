@@ -138,14 +138,13 @@ static umode_t access_flags_to_mode(__le32 ace_flags, int type)
 		ksmbd_err("all perms\n");
 		return mode;
 	}
+
+	mode = 0444;
 	if ((flags & GENERIC_WRITE) ||
-			((flags & FILE_WRITE_RIGHTS) == FILE_WRITE_RIGHTS))
-		mode = 0222;
-	if ((flags & GENERIC_READ) ||
-			((flags & FILE_READ_RIGHTS) == FILE_READ_RIGHTS))
-		mode |= 0444;
+			(flags & FILE_WRITE_RIGHTS))
+		mode |= 0222;
 	if ((flags & GENERIC_EXECUTE) ||
-			((flags & FILE_EXEC_RIGHTS) == FILE_EXEC_RIGHTS))
+			(flags & FILE_EXEC_RIGHTS))
 		mode |= 0111;
 
 	ksmbd_debug(SMB, "access flags 0x%x mode now %04o\n", flags, mode);
@@ -430,6 +429,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
 				acl_state.owner.allow = mode & 0700 >> 6;
+
 				fattr->daccess = ace->access_req;
 				acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
 				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
@@ -439,7 +439,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
 				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 				mode &= 0700;
-			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid)) {
+			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid) ||
+					le32_to_cpu(ppace[i]->sid.sub_auth[ppace[i]->sid.num_subauth - 1]) == 513) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
 				acl_state.group.allow = mode & 0070 >> 3;
@@ -465,7 +466,9 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				if (ret || uid_eq(temp_fattr.cf_uid, INVALID_UID)) {
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 							__func__, ret);
+					continue;
 				} else {
+					fattr->daccess = ace->access_req;
 					acl_state.owner.allow = mode & 0700 >> 6;
 					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
 					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;

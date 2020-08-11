@@ -701,3 +701,33 @@ void ksmbd_revert_fsids(struct ksmbd_work *work)
 		work->saved_cred = NULL;
 	}
 }
+
+__le32 set_desired_access(__le32 daccess)
+{
+	if (daccess & FILE_GENERIC_READ_LE) {
+		daccess |= cpu_to_le32(GENERIC_READ_FLAGS);
+		daccess &= ~FILE_GENERIC_READ_LE;
+	}
+
+	if (daccess & FILE_GENERIC_WRITE_LE) {
+		daccess |= cpu_to_le32(GENERIC_WRITE_FLAGS);
+		daccess &= ~FILE_GENERIC_WRITE_LE;
+	}
+
+	if (daccess & FILE_GENERIC_EXECUTE_LE) {
+		daccess |= cpu_to_le32(GENERIC_EXECUTE_FLAGS);
+		daccess &= ~FILE_GENERIC_EXECUTE_LE;
+	}
+
+	if (daccess & FILE_GENERIC_ALL_LE) {
+		daccess |= cpu_to_le32(GENERIC_ALL_FLAGS);
+		daccess &= ~FILE_GENERIC_ALL_LE;
+	}
+
+	if (daccess & FILE_MAXIMAL_ACCESS_LE) {
+		daccess |= GENERIC_ALL_FLAGS;
+		daccess &= ~FILE_MAXIMAL_ACCESS_LE;
+	}
+
+	return daccess;
+}

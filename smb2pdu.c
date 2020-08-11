@@ -1661,7 +1661,6 @@ static int smb2_create_open_flags(bool file_present, __le32 access,
 		oflags |= O_WRONLY;
 	else
 		oflags |= O_RDONLY;
-
 	if (file_present) {
 		switch (disposition & FILE_CREATE_MASK_LE) {
 		case FILE_OPEN_LE:
@@ -2802,20 +2801,25 @@ int smb2_open(struct ksmbd_work *work)
 		goto err_out;
 	}
 
-	fp->filename = name;
-	fp->cdoption = req->CreateDisposition;
-	fp->daccess = set_desired_access(req->DesiredAccess);
-	if (fp->f_ci->daccess)
-		fp->daccess = fp->f_ci->daccess & fp->daccess;
-	fp->saccess = req->ShareAccess;
-	fp->coption = req->CreateOptions;
-
 	/* Get Persistent-ID */
 	ksmbd_open_durable_fd(fp);
 	if (!HAS_FILE_ID(fp->persistent_id)) {
 		rc = -ENOMEM;
 		goto err_out;
 	}
+
+	fp->filename = name;
+	fp->cdoption = req->CreateDisposition;
+	fp->daccess = set_desired_access(req->DesiredAccess);
+	if (fp->f_ci->m_daccess) {
+		if (!(fp->f_ci->m_daccess & fp->daccess)) {
+			rc = -EACCES;
+			goto err_out;
+		}
+		fp->daccess = fp->f_ci->m_daccess & fp->daccess;
+	}
+	fp->saccess = req->ShareAccess;
+	fp->coption = req->CreateOptions;
 
 	if (stream_name) {
 		rc = smb2_set_stream_name_xattr(&path,
@@ -2942,13 +2946,13 @@ int smb2_open(struct ksmbd_work *work)
 		smb2_new_xattrs(tcon, &path, fp);
 
 	/* Write acls */
-	if (created && req->DesiredAccess & FILE_WRITE_OWNER_LE) {
+	if (created && req->DesiredAccess & FILE_WRITE_DAC_LE) {
 		struct posix_acl_state acl_state;
 		struct posix_acl *acls;
 		struct inode *inode = FP_INODE(fp);
 		struct smb_fattr fattr;
 
-		init_acl_state(&acl_state, 3);
+		init_acl_state(&acl_state, 1);
 
 		/* set owner group */
 		acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
@@ -2979,16 +2983,16 @@ int smb2_open(struct ksmbd_work *work)
 			struct posix_acl_state default_acl_state;
 			struct posix_acl *dacls;
 
-			init_acl_state(&default_acl_state, 3);
-			default_acl_state.owner.allow = inode->i_mode;
+			init_acl_state(&default_acl_state, 1);
+			default_acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
 			default_acl_state.group.allow = 0;
 			default_acl_state.other.allow = 0;
-			default_acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
-			default_acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
-			default_acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
-			default_acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
+			default_acl_state.users->aces[default_acl_state.users->n].uid = inode->i_uid;
+			default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = default_acl_state.owner.allow;
+			default_acl_state.groups->aces[default_acl_state.groups->n].gid = inode->i_gid;
+			default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = default_acl_state.group.allow;
 			default_acl_state.mask.allow = 0x07;
-			dacls = posix_acl_alloc(3, GFP_KERNEL);
+			dacls = posix_acl_alloc(6, GFP_KERNEL);
 			posix_state_to_acl(&default_acl_state, dacls->a_entries);
 			free_acl_state(&default_acl_state);
 
@@ -5750,6 +5754,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
+	fattr.cf_mode = inode->i_mode & 07777;
 
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
@@ -5775,9 +5780,8 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	posix_acl_release(fattr.cf_dacls);
 	kfree(fattr.nt_acl);
 
-	if (fattr.daccess)
-		fp->f_ci->daccess = fattr.daccess;
-	fp->f_ci->daccess |= FILE_READ_ATTRIBUTES_LE | FILE_DELETE_LE |
+	fp->f_ci->m_daccess = fattr.daccess;
+	fp->f_ci->m_daccess |= FILE_READ_ATTRIBUTES_LE | FILE_DELETE_LE |
 		FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE;
 	return rc;
 }
