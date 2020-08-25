@@ -175,5 +175,7 @@ void free_acl_state(struct posix_acl_state *state);
 void posix_state_to_acl(struct posix_acl_state *state,
 		struct posix_acl_entry *pace);
 int smb2_set_default_nt_acl(struct smb_fattr *fattr);
+void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid);
+int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid);
 
 #endif /* _SMBACL_H */

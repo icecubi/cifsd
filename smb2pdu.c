@@ -1661,6 +1661,7 @@ static int smb2_create_open_flags(bool file_present, __le32 access,
 		oflags |= O_WRONLY;
 	else
 		oflags |= O_RDONLY;
+
 	if (file_present) {
 		switch (disposition & FILE_CREATE_MASK_LE) {
 		case FILE_OPEN_LE:
@@ -2131,6 +2132,35 @@ static noinline int smb2_set_stream_name_xattr(struct path *path,
 	return 0;
 }
 
+static int smb2_remove_acl_xattrs(struct dentry *dentry)
+{
+	char *name, *xattr_list = NULL;
+	ssize_t xattr_list_len;
+	int err = 0;
+
+	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
+	if (xattr_list_len < 0) {
+		goto out;
+	} else if (!xattr_list_len) {
+		ksmbd_debug(SMB, "empty xattr in the file\n");
+		goto out;
+	}
+
+	for (name = xattr_list; name - xattr_list < xattr_list_len;
+			name += strlen(name) + 1) {
+		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
+
+		if (!strncmp(name, XATTR_NAME_POSIX_ACL_DEFAULT, sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)-1)) {
+			err = ksmbd_vfs_remove_xattr(dentry, name);
+			if (err)
+				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);
+		}
+	}
+out:
+	ksmbd_vfs_xattr_free(xattr_list);
+	return err;
+}
+
 static int smb2_remove_sd_xattrs(struct dentry *dentry)
 {
 	char *name, *xattr_list = NULL;
@@ -2149,10 +2179,7 @@ static int smb2_remove_sd_xattrs(struct dentry *dentry)
 			name += strlen(name) + 1) {
 		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
 
-		if (!strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN) &&
-			!strncmp(&name[XATTR_USER_PREFIX_LEN],
-				SD_PREFIX,
-				SD_PREFIX_LEN)) {
+		if (!strncmp(name, XATTR_NAME_SD, XATTR_NAME_SD_LEN)) {
 			err = ksmbd_vfs_remove_xattr(dentry, name);
 			if (err)
 				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);
@@ -2176,9 +2203,8 @@ static noinline int smb2_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int 
 	return 0;
 }
 
-static noinline struct smb_nt_acl *smb2_get_sd_xattr(struct ksmbd_file *fp)
+static noinline struct smb_nt_acl *smb2_get_sd_xattr(struct dentry *dentry)
 {
-	struct dentry *dentry = fp->filp->f_path.dentry;
 	char *attr = NULL, *sd_data = NULL;
 	int rc;
 
@@ -2391,6 +2417,7 @@ int smb2_open(struct ksmbd_work *work)
 	int share_ret = 0, need_truncate = 0;
 	u64 time;
 	umode_t posix_mode = 0;
+	__le32 daccess;
 
 	rsp_org = RESPONSE_BUF(work);
 	WORK_BUFFERS(work, req, rsp);
@@ -2613,7 +2640,7 @@ int smb2_open(struct ksmbd_work *work)
 		}
 	}
 
-	if (!(req->DesiredAccess & FILE_MAXIMAL_ACCESS_LE) && ksmbd_override_fsids(work)) {
+	if (ksmbd_override_fsids(work)) {
 		rc = -ENOMEM;
 		goto err_out1;
 	}
@@ -2728,8 +2755,59 @@ int smb2_open(struct ksmbd_work *work)
 		file_present = ksmbd_close_inode_fds(work,
 						     d_inode(path.dentry));
 
+	daccess = smb_map_generic_desired_access(req->DesiredAccess);
+
+	if (file_present) {
+		struct smb_nt_acl *nt_acl;
+		int i;
+		struct smb_sid sid;
+		int found = 0;
+		int granted = (daccess & ~FILE_MAXIMAL_ACCESS_LE);
+	
+		nt_acl = smb2_get_sd_xattr(path.dentry);
+		if (nt_acl) {
+
+		if (daccess & FILE_MAXIMAL_ACCESS_LE) {
+			for (i = 0; i < nt_acl->num_aces; i++) {
+				granted |= nt_acl->ace[i].access_req;
+			}
+		}
+
+		id_to_sid(sess->user->uid, SIDOWNER, &sid);
+
+		// check permission of fp dacesss with each ondisk dcal aces
+		for (i = 0; i < nt_acl->num_aces; i++) {
+			if (!compare_sids(&sid, &nt_acl->ace[i].sid)) {
+				found = 1;
+				break;
+			}
+		}
+
+		if (!found) {
+			rc = -EACCES;
+			kfree(nt_acl);
+			goto err_out;
+		}
+
+		if (granted & ~(nt_acl->ace[i].access_req | FILE_READ_ATTRIBUTES_LE)) {
+			rc = -EACCES;
+			kfree(nt_acl);
+			goto err_out;
+		}
+
+		kfree(nt_acl);
+		daccess |= granted;
+		}
+	}
+
 	open_flags = smb2_create_open_flags(file_present,
-		req->DesiredAccess, req->CreateDisposition);
+		daccess, req->CreateDisposition);
+
+	if (daccess & FILE_MAXIMAL_ACCESS_LE) {
+		daccess &= ~FILE_MAXIMAL_ACCESS_LE;
+		daccess |= FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE |
+			FILE_READ_ATTRIBUTES_LE | FILE_DELETE_LE;
+	}
 
 	if (!test_tree_conn_flag(tcon, KSMBD_TREE_CONN_FLAG_WRITABLE)) {
 		if (open_flags & O_CREAT) {
@@ -2810,16 +2888,68 @@ int smb2_open(struct ksmbd_work *work)
 
 	fp->filename = name;
 	fp->cdoption = req->CreateDisposition;
-	fp->daccess = set_desired_access(req->DesiredAccess);
-	if (fp->f_ci->m_daccess) {
-		if (!(fp->f_ci->m_daccess & fp->daccess)) {
-			rc = -EACCES;
-			goto err_out;
-		}
-		fp->daccess = fp->f_ci->m_daccess & fp->daccess;
-	}
+	fp->daccess = daccess;
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
+
+	/* Write acls */
+	if (created) {
+		struct posix_acl_state acl_state;
+		struct posix_acl *acls;
+		struct inode *inode = FP_INODE(fp);
+		struct smb_fattr fattr;
+
+		init_acl_state(&acl_state, 1);
+
+		/* set owner group */
+		acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
+		acl_state.group.allow = (inode->i_mode & 0070) >> 3;
+		acl_state.other.allow = inode->i_mode & 0007;
+		acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
+		acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
+		acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
+		acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
+		acl_state.mask.allow = 0x07;
+
+		acls = posix_acl_alloc(6, GFP_KERNEL);
+
+		posix_state_to_acl(&acl_state, acls->a_entries);
+		free_acl_state(&acl_state);
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
+		
+		// write xattr nacl
+		fattr.cf_uid = inode->i_uid;
+		fattr.cf_gid = inode->i_gid;
+		fattr.cf_mode = inode->i_mode;
+
+		smb2_set_default_nt_acl(&fattr);
+		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+		kfree(fattr.nt_acl);
+		posix_acl_release(acls);
+
+		if (S_ISDIR(inode->i_mode)) {
+			struct posix_acl_state default_acl_state;
+			struct posix_acl *dacls;
+
+			init_acl_state(&default_acl_state, 1);
+			default_acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
+			default_acl_state.group.allow = 0;
+			default_acl_state.other.allow = 0;
+			default_acl_state.users->aces[default_acl_state.users->n].uid = inode->i_uid;
+			default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = default_acl_state.owner.allow;
+			default_acl_state.groups->aces[default_acl_state.groups->n].gid = inode->i_gid;
+			default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = default_acl_state.group.allow;
+			default_acl_state.mask.allow = 0x07;
+			dacls = posix_acl_alloc(6, GFP_KERNEL);
+			posix_state_to_acl(&default_acl_state, dacls->a_entries);
+			free_acl_state(&default_acl_state);
+
+			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, dacls);
+			posix_acl_release(dacls);
+			// write xattr nacl
+		}
+		rc = 0;
+	}
 
 	if (stream_name) {
 		rc = smb2_set_stream_name_xattr(&path,
@@ -2944,64 +3074,6 @@ int smb2_open(struct ksmbd_work *work)
 		smb2_update_xattrs(tcon, &path, fp);
 	else
 		smb2_new_xattrs(tcon, &path, fp);
-
-	/* Write acls */
-	if (created && req->DesiredAccess & FILE_WRITE_DAC_LE) {
-		struct posix_acl_state acl_state;
-		struct posix_acl *acls;
-		struct inode *inode = FP_INODE(fp);
-		struct smb_fattr fattr;
-
-		init_acl_state(&acl_state, 1);
-
-		/* set owner group */
-		acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
-		acl_state.group.allow = (inode->i_mode & 0070) >> 3;
-		acl_state.other.allow = inode->i_mode & 0007;
-		acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
-		acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
-		acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
-		acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
-		acl_state.mask.allow = 0x07;
-
-		acls = posix_acl_alloc(6, GFP_KERNEL);
-
-		posix_state_to_acl(&acl_state, acls->a_entries);
-		free_acl_state(&acl_state);
-		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
-		// write xattr nacl
-		fattr.cf_uid = inode->i_uid;
-		fattr.cf_gid = inode->i_gid;
-		fattr.cf_mode = inode->i_mode;
-
-		smb2_set_default_nt_acl(&fattr);
-		smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
-		kfree(fattr.nt_acl);
-		posix_acl_release(acls);
-
-		if (S_ISDIR(inode->i_mode)) {
-			struct posix_acl_state default_acl_state;
-			struct posix_acl *dacls;
-
-			init_acl_state(&default_acl_state, 1);
-			default_acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
-			default_acl_state.group.allow = 0;
-			default_acl_state.other.allow = 0;
-			default_acl_state.users->aces[default_acl_state.users->n].uid = inode->i_uid;
-			default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = default_acl_state.owner.allow;
-			default_acl_state.groups->aces[default_acl_state.groups->n].gid = inode->i_gid;
-			default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = default_acl_state.group.allow;
-			default_acl_state.mask.allow = 0x07;
-			dacls = posix_acl_alloc(6, GFP_KERNEL);
-			posix_state_to_acl(&default_acl_state, dacls->a_entries);
-			free_acl_state(&default_acl_state);
-
-			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, dacls);
-			posix_acl_release(dacls);
-			// write xattr nacl
-		}
-		rc = 0;
-	}
 
 	memcpy(fp->client_guid, conn->ClientGUID, SMB2_CLIENT_GUID_SIZE);
 
@@ -4944,7 +5016,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	if (S_ISDIR(inode->i_mode))
 		fattr.cf_dacls = get_acl(inode, ACL_TYPE_DEFAULT);
 
-	fattr.nt_acl = smb2_get_sd_xattr(fp);
+	fattr.nt_acl = smb2_get_sd_xattr(fp->filp->f_path.dentry);
 	if (!fattr.nt_acl) {
 		ksmbd_err("faild to load nt acl data\n");
 		return -ENOMEM;
@@ -5751,6 +5823,11 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	struct inode *inode = FP_INODE(fp);
 	struct smb_fattr fattr = {0};
 	int rc;
+#if 0
+	char *name, *xattr_list = NULL;
+	int xattr_list_len, idx = 0, name_len;
+#endif
+	struct dentry *dentry = fp->filp->f_path.dentry;
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
@@ -5767,9 +5844,27 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		inode->i_gid = fattr.cf_gid;
 
 	//set acls
-	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
-	if (S_ISDIR(inode->i_mode))
+	if (fattr.cf_dacls) {
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+	}
+
+	if (S_ISDIR(inode->i_mode) && fattr.cf_dacls) {
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+	}
+
+#if 0
+	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
+	while (idx < xattr_list_len) {
+		name = xattr_list + idx;
+		name_len = strlen(name);
+
+		ksmbd_err( "xattr name : %s, len %d\n", name, name_len);
+
+		idx += name_len + 1;
+	}
+#endif
+
+	smb2_remove_acl_xattrs(dentry);
 
 	// write xattr nacl
 	smb2_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
@@ -5780,9 +5875,6 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	posix_acl_release(fattr.cf_dacls);
 	kfree(fattr.nt_acl);
 
-	fp->f_ci->m_daccess = fattr.daccess;
-	fp->f_ci->m_daccess |= FILE_READ_ATTRIBUTES_LE | FILE_DELETE_LE |
-		FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE;
 	return rc;
 }
 

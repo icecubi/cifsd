@@ -64,7 +64,7 @@ static const struct smb_sid sid_unix_NFS_mode = { 1, 2, {0, 0, 0, 0, 0, 5},
  * if the two SIDs (roughly equivalent to a UUID for a user or group) are
  * the same returns zero, if they do not match returns non-zero.
  */
-static int
+int
 compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid)
 {
 	int i;
@@ -209,7 +209,7 @@ static __u16 fill_ace_for_sid(struct smb_ace *pntace,
 	return size;
 }
 
-static void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
+void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
 {
 	switch (sidtype) {
 	case SIDOWNER:
@@ -418,7 +418,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
 
 			memcpy(ace, ppace[i], ppace[i]->size);
-			ace->access_req = set_desired_access(ppace[i]->access_req);
+			ace->access_req = smb_map_generic_desired_access(ppace[i]->access_req);
 
 			if ((compare_sids(&(ppace[i]->sid),
 					  &sid_unix_NFS_mode) == 0)) {
@@ -456,6 +456,15 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 						ppace[i]->type);
 				acl_state.other.allow = mode & 0007;
 				mode &= 0007;
+			} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
+						     ppace[i]->type);
+				goto skip;
+
+			} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
+						     ppace[i]->type);
+				goto skip;
 			} else {
 				struct smb_fattr temp_fattr;
 
@@ -466,60 +475,46 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				if (ret || uid_eq(temp_fattr.cf_uid, INVALID_UID)) {
 					ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 							__func__, ret);
-					continue;
+					goto skip;
 				} else {
 					fattr->daccess = ace->access_req;
 					acl_state.owner.allow = mode & 0700 >> 6;
 					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
 					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
-
-					/* default acl */
-					default_acl_state.owner.allow = mode & 0700 >> 6;
-					default_acl_state.users->aces[default_acl_state.users->n].uid = temp_fattr.cf_uid;
-					default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 				}
 			}
 
 			fattr->cf_mode |= mode;
-
+skip:
 			acl_base = (char *)ppace[i];
 			acl_size = le16_to_cpu(ppace[i]->size);
 			ace = (struct smb_ace *)((char *)ace + ppace[i]->size);
 		}
-
-		if (acl_state.users->n || acl_state.users->n)
-			acl_state.mask.allow = 0x07;
-
-		if (default_acl_state.users->n || default_acl_state.users->n)
-			default_acl_state.mask.allow = 0x07;
-
 		kfree(ppace);
 
-		/*
-		 * When there are no effective ACEs, the following will end
-		 * up setting a 3-element effective posix ACL with all
-		 * permissions zero.
-		 */
-		if (!acl_state.users->n && !acl_state.groups->n)
-			num_aces = 3;
-		else /* Note we also include a MASK ACE in this case: */
-			num_aces = 4 + acl_state.users->n + acl_state.groups->n;
+		num_aces = 4 + acl_state.users->n + acl_state.groups->n;
+		if (acl_state.users->n || acl_state.groups->n) {
+			acl_state.mask.allow = 0x07;
+			fattr->cf_acls = posix_acl_alloc(num_aces, GFP_KERNEL);
+			if (!fattr->cf_acls)
+				return;
 
-		fattr->cf_acls = posix_acl_alloc(num_aces, GFP_KERNEL);
-		if (!fattr->cf_acls)
-			return;
+			cf_pace = fattr->cf_acls->a_entries;
+			posix_state_to_acl(&acl_state, cf_pace);
+			free_acl_state(&acl_state);
+		}
 
-		fattr->cf_dacls = posix_acl_alloc(num_aces, GFP_KERNEL);
-		if (!fattr->cf_dacls)
-			return;
+		if (default_acl_state.users->n || default_acl_state.groups->n) {
+			default_acl_state.mask.allow = 0x07;
 
-		cf_pace = fattr->cf_acls->a_entries;
-		cf_pdace = fattr->cf_dacls->a_entries;
+			fattr->cf_dacls = posix_acl_alloc(num_aces, GFP_KERNEL);
+			if (!fattr->cf_dacls)
+				return;
 
-		posix_state_to_acl(&acl_state, cf_pace);
-		posix_state_to_acl(&default_acl_state, cf_pdace);
-		free_acl_state(&acl_state);
-		free_acl_state(&default_acl_state);
+			cf_pdace = fattr->cf_dacls->a_entries;
+			posix_state_to_acl(&default_acl_state, cf_pdace);
+			free_acl_state(&default_acl_state);
+		}
 	}
 }
 
@@ -688,7 +683,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 			return rc;
 		}
 
-		rc = sid_to_id(owner_sid_ptr, SIDOWNER, fattr);
+		rc= sid_to_id(owner_sid_ptr, SIDOWNER, fattr);
 		if (rc) {
 			ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 					__func__, rc);
@@ -812,7 +807,7 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr)
 	mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
 	if (!access_req)
 		access_req = SET_MINIMUM_RIGHTS;
-	pace->access_req = access_req;
+	pace->access_req = access_req | FILE_DELETE_LE;
 
 	smb_copy_sid(&pace->sid, &cifsd_domain);
 	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);

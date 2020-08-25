@@ -702,7 +702,7 @@ void ksmbd_revert_fsids(struct ksmbd_work *work)
 	}
 }
 
-__le32 set_desired_access(__le32 daccess)
+__le32 smb_map_generic_desired_access(__le32 daccess)
 {
 	if (daccess & FILE_GENERIC_READ_LE) {
 		daccess |= cpu_to_le32(GENERIC_READ_FLAGS);
@@ -722,11 +722,6 @@ __le32 set_desired_access(__le32 daccess)
 	if (daccess & FILE_GENERIC_ALL_LE) {
 		daccess |= cpu_to_le32(GENERIC_ALL_FLAGS);
 		daccess &= ~FILE_GENERIC_ALL_LE;
-	}
-
-	if (daccess & FILE_MAXIMAL_ACCESS_LE) {
-		daccess |= GENERIC_ALL_FLAGS;
-		daccess &= ~FILE_MAXIMAL_ACCESS_LE;
 	}
 
 	return daccess;

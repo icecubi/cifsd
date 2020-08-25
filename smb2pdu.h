@@ -521,8 +521,7 @@ struct smb2_tree_disconnect_rsp {
 					FILE_WRITE_ATTRIBUTES_LE |	\
 					FILE_DELETE_LE |		\
 					FILE_GENERIC_WRITE_LE)
-#define FILE_RW_DESIRED_ACCESS		(FILE_MAXIMAL_ACCESS_LE |	\
-					FILE_GENERIC_ALL_LE)
+#define FILE_RW_DESIRED_ACCESS		(FILE_GENERIC_ALL_LE)
 
 /* Impersonation Levels */
 #define IL_ANONYMOUS_LE		cpu_to_le32(0x00000000)
