@@ -495,7 +495,7 @@ skip:
 		num_aces = 4 + acl_state.users->n + acl_state.groups->n;
 		if (acl_state.users->n || acl_state.groups->n) {
 			acl_state.mask.allow = 0x07;
-			fattr->cf_acls = posix_acl_alloc(num_aces, GFP_KERNEL);
+			fattr->cf_acls = posix_acl_alloc(4 + acl_state.users->n + acl_state.groups->n, GFP_KERNEL);
 			if (!fattr->cf_acls)
 				return;
 
@@ -506,8 +506,7 @@ skip:
 
 		if (default_acl_state.users->n || default_acl_state.groups->n) {
 			default_acl_state.mask.allow = 0x07;
-
-			fattr->cf_dacls = posix_acl_alloc(num_aces, GFP_KERNEL);
+			fattr->cf_dacls = posix_acl_alloc(4 + default_acl_state.users->n + default_acl_state.groups->n, GFP_KERNEL);
 			if (!fattr->cf_dacls)
 				return;
 
@@ -530,7 +529,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	int flags = 0;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
-	
+
 	if (fattr->nt_acl->num_aces) {
 		struct smb_ace *ace;
 
@@ -782,67 +781,166 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	return rc;
 }
 
-int smb2_set_default_nt_acl(struct smb_fattr *fattr)
+static void smb_set_ace(struct smb_ace *ace, const struct smb_sid *sid, u8 type,
+		u8 flags, __le32 access_req)
+{
+	ace->type = type;
+	ace->flags = flags;
+	ace->access_req = access_req;
+	memcpy(&ace->sid, sid, sizeof(struct smb_sid));
+	ace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (sid->num_subauth * 4);
+}
+
+int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool is_dir, struct smb_sid *owner_sid, struct smb_sid *group_sid)
 {
 	int num_aces = 3;
 	struct smb_ace *pace;
 	__u32 access_req;
 	char *pace_base;
+	struct smb_nt_acl *p_nt_acl;
 
-	fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + num_aces * sizeof(struct smb_ace),
-		GFP_KERNEL);
-	if (!fattr->nt_acl)
-		return -ENOMEM;
-	fattr->nt_acl->num_aces = num_aces;
+	//get parent acl
+	p_nt_acl = ksmbd_vfs_get_sd_xattr(parent);
+	if (p_nt_acl) {
+		struct smb_ace *aces = kmalloc(sizeof(struct smb_ace) * p_nt_acl->num_aces * 2, GFP_KERNEL);
+		int flags = 0;
+		int nt_size = 0;
+		int i;
+		int ace_n = 0;
+		struct smb_ace *paces = p_nt_acl->ace;
+		struct smb_ace *aces_base = aces;
+		const struct smb_sid *psid;
+		const struct smb_sid *creator = NULL;
+		int auto_inherited_flags = paces->type & DACL_AUTO_INHERITED;
 
-	pace_base = kmalloc_array(num_aces, sizeof(struct smb_ace),
-		GFP_KERNEL);
-	if (!pace_base)
-		return -ENOMEM;
+		for (i = 0; i < p_nt_acl->num_aces; i++) {
+			flags = paces->flags;
+			if (!smb_inherit_flags(paces->flags, is_dir))
+				continue;
+			if (is_dir) {
+				flags &= ~(INHERIT_ONLY_ACE | INHERITED_ACE);
+				if (!(flags & CONTAINER_INHERIT_ACE))
+					flags |= INHERIT_ONLY_ACE;
+				if (flags & NO_PROPAGATE_INHERIT_ACE)
+					flags = 0;
+			} else
+				flags = 0;
 
-	/* owner RID */
-	pace = (struct smb_ace *)pace_base;
-	pace->type = ACCESS_ALLOWED;
-	pace->flags = 0;
-	mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
-	if (!access_req)
-		access_req = SET_MINIMUM_RIGHTS;
-	pace->access_req = access_req | FILE_DELETE_LE;
+			if (paces->type & DACL_AUTO_INHERITED)
+				flags |= INHERITED_ACE;
 
-	smb_copy_sid(&pace->sid, &cifsd_domain);
-	pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);
-	pace->sid.num_subauth++;
-	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
-	fattr->nt_acl->size = pace->size;
+			if (!compare_sids(&creator_owner, &paces->sid)) {
+				creator = &creator_owner;
+				psid = owner_sid;
+			} else if (!compare_sids(&creator_group, &paces->sid)) {
+				creator = &creator_group;
+				psid = group_sid;
+			} else {
+				creator = NULL;
+				psid = &paces->sid;
+			}
 
-	/* Domain users */
-	pace = (struct smb_ace *)((char *)pace + pace->size);
-	pace->type = ACCESS_ALLOWED;
-	pace->flags = 0;
-	mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
-	if (!access_req)
-		access_req = SET_MINIMUM_RIGHTS;
-	pace->access_req = access_req;
+			if (is_dir && creator && flags & CONTAINER_INHERIT_ACE) {
+				smb_set_ace(aces, psid, paces->type, auto_inherited_flags, paces->access_req);
+				nt_size += aces->size;
+				ace_n++;
+				aces = (struct smb_ace *)((char *)aces + aces->size);
+				flags |= INHERIT_ONLY_ACE;
+				psid = creator;
+			} else if (is_dir && !(paces->flags & NO_PROPAGATE_INHERIT_ACE))
+				psid = &paces->sid;
 
-	smb_copy_sid(&pace->sid, &cifsd_domain);
-	pace->sid.sub_auth[pace->sid.num_subauth] = 513;
-	pace->sid.num_subauth++;
-	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
-	fattr->nt_acl->size += pace->size;
+			smb_set_ace(aces, psid, paces->type, flags | auto_inherited_flags, paces->access_req);
+			nt_size += aces->size;
+			aces = (struct smb_ace *)((char *)aces + aces->size);
+			ace_n++;
+			paces = (struct smb_ace *)((char *)paces + paces->size);
+		}
 
-	/* other */
-	pace = (struct smb_ace *)((char *)pace + pace->size);
-	pace->type = ACCESS_ALLOWED;
-	pace->flags = 0;
-	mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
-	if (!access_req)
-		access_req = SET_MINIMUM_RIGHTS;
-	pace->access_req = access_req;
-	smb_copy_sid(&pace->sid, &sid_everyone);
-	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
-	fattr->nt_acl->size += pace->size;
+		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + nt_size,
+				GFP_KERNEL);
+		if (!fattr->nt_acl)
+			return -ENOMEM;
+		fattr->nt_acl->num_aces = ace_n;
+		fattr->nt_acl->type = SELF_RELATIVE | DACL_PRESENT; 
+		if (p_nt_acl->type & DACL_AUTO_INHERITED)
+			fattr->nt_acl->type |= DACL_AUTO_INHERITED;
+		fattr->nt_acl->size = nt_size;
 
-	memcpy(fattr->nt_acl->ace, pace_base, fattr->nt_acl->size);
+		memcpy(fattr->nt_acl->ace, aces_base, nt_size);
+		kfree(p_nt_acl);
+
+	} else {
+
+		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + num_aces * sizeof(struct smb_ace),
+				GFP_KERNEL);
+		if (!fattr->nt_acl)
+			return -ENOMEM;
+		fattr->nt_acl->num_aces = num_aces;
+
+		pace_base = kmalloc_array(num_aces, sizeof(struct smb_ace),
+				GFP_KERNEL);
+		if (!pace_base)
+			return -ENOMEM;
+
+		/* owner RID */
+		pace = (struct smb_ace *)pace_base;
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0;
+		mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req | FILE_DELETE_LE;
+
+		smb_copy_sid(&pace->sid, &cifsd_domain);
+		pace->sid.sub_auth[pace->sid.num_subauth] = from_kuid(&init_user_ns, fattr->cf_uid);
+		pace->sid.num_subauth++;
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		fattr->nt_acl->size = pace->size;
+
+		/* Domain users */
+		pace = (struct smb_ace *)((char *)pace + pace->size);
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0;
+		mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req;
+
+		smb_copy_sid(&pace->sid, &cifsd_domain);
+		pace->sid.sub_auth[pace->sid.num_subauth] = 513;
+		pace->sid.num_subauth++;
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		fattr->nt_acl->size += pace->size;
+
+		/* other */
+		pace = (struct smb_ace *)((char *)pace + pace->size);
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0;
+		mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req;
+		smb_copy_sid(&pace->sid, &sid_everyone);
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		fattr->nt_acl->size += pace->size;
+
+		memcpy(fattr->nt_acl->ace, pace_base, fattr->nt_acl->size);
+	}
+	fattr->nt_acl->type = SELF_RELATIVE | DACL_PRESENT; 
 
 	return 0;
-}	
+}
+
+bool smb_inherit_flags(int flags, bool is_dir)
+{
+	if (!is_dir)
+		return (flags & OBJECT_INHERIT_ACE) != 0;
+
+	if (flags & OBJECT_INHERIT_ACE && !(flags & NO_PROPAGATE_INHERIT_ACE))
+		return true;
+
+	if (flags & CONTAINER_INHERIT_ACE)
+			return true;
+	return false;
+}

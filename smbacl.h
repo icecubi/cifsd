@@ -65,6 +65,14 @@
 #define SYSTEM_RESOURCE_ATTRIBUTE_ACE_TYPE 0x12
 #define SYSTEM_SCOPED_POLICY_ID_ACE_TYPE 0x13
 
+/* ACE flags */
+#define OBJECT_INHERIT_ACE		0x01
+#define CONTAINER_INHERIT_ACE		0x02
+#define NO_PROPAGATE_INHERIT_ACE	0x04
+#define INHERIT_ONLY_ACE		0x08
+#define INHERITED_ACE			0x10
+#define SUCCESSFUL_ACCESS_ACE_FLAG	0x40
+#define FAILED_ACCESS_ACE_FLAG		0x80
 
 /*
  * Maximum size of a string representation of a SID:
@@ -119,6 +127,7 @@ struct smb_ace {
 
 struct smb_nt_acl {
 	int size;
+	int type;
 	int num_aces;
 	struct smb_ace ace[];
 };
@@ -174,8 +183,9 @@ int init_acl_state(struct posix_acl_state *state, int cnt);
 void free_acl_state(struct posix_acl_state *state);
 void posix_state_to_acl(struct posix_acl_state *state,
 		struct posix_acl_entry *pace);
-int smb2_set_default_nt_acl(struct smb_fattr *fattr);
+int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool is_dir, struct smb_sid *owner_sid, struct smb_sid *group_sid);
 void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid);
 int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid);
+bool smb_inherit_flags(int flags, bool is_dir);
 
 #endif /* _SMBACL_H */

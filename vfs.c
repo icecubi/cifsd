@@ -1396,6 +1396,180 @@ int ksmbd_vfs_fsetxattr(struct ksmbd_work *work,
 }
 #endif
 
+int ksmbd_vfs_remove_acl_xattrs(struct dentry *dentry)
+{
+	char *name, *xattr_list = NULL;
+	ssize_t xattr_list_len;
+	int err = 0;
+
+	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
+	if (xattr_list_len < 0) {
+		goto out;
+	} else if (!xattr_list_len) {
+		ksmbd_debug(SMB, "empty xattr in the file\n");
+		goto out;
+	}
+
+	for (name = xattr_list; name - xattr_list < xattr_list_len;
+			name += strlen(name) + 1) {
+		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
+
+		if (!strncmp(name, XATTR_NAME_POSIX_ACL_DEFAULT, sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)-1)) {
+			err = ksmbd_vfs_remove_xattr(dentry, name);
+			if (err)
+				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);
+		}
+	}
+out:
+	ksmbd_vfs_xattr_free(xattr_list);
+	return err;
+}
+
+int ksmbd_vfs_remove_sd_xattrs(struct dentry *dentry)
+{
+	char *name, *xattr_list = NULL;
+	ssize_t xattr_list_len;
+	int err = 0;
+
+	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
+	if (xattr_list_len < 0) {
+		goto out;
+	} else if (!xattr_list_len) {
+		ksmbd_debug(SMB, "empty xattr in the file\n");
+		goto out;
+	}
+
+	for (name = xattr_list; name - xattr_list < xattr_list_len;
+			name += strlen(name) + 1) {
+		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
+
+		if (!strncmp(name, XATTR_NAME_SD, XATTR_NAME_SD_LEN)) {
+			err = ksmbd_vfs_remove_xattr(dentry, name);
+			if (err)
+				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);
+		}
+	}
+out:
+	ksmbd_vfs_xattr_free(xattr_list);
+	return err;
+}
+
+int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size)
+{
+	struct dentry *dentry = fp->filp->f_path.dentry;
+	int rc;
+
+	ksmbd_vfs_remove_sd_xattrs(dentry);
+
+	rc = ksmbd_vfs_setxattr(dentry, XATTR_NAME_SD, sd_data, size, 0);
+	if (rc < 0)
+		ksmbd_err("Failed to store XATTR sd :%d\n", rc);
+	return 0;
+}
+
+struct smb_nt_acl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
+{
+	char *attr = NULL, *sd_data = NULL;
+	int rc;
+
+	rc = ksmbd_vfs_getxattr(dentry, XATTR_NAME_SD, &attr);
+	if (rc > 0) {
+		sd_data = kzalloc(rc, GFP_KERNEL);
+		if (!sd_data)
+			return NULL;
+
+		memcpy(sd_data, attr, rc);
+	}
+
+	ksmbd_free(attr);
+	return (struct smb_nt_acl *)sd_data;
+}
+
+/*
+* Check if an acl is valid. Returns 0 if it is, or -E... otherwise.
+*  */
+static int
+ksmbd_posix_acl_valid(struct user_namespace *user_ns, const struct posix_acl *acl)
+{
+	const struct posix_acl_entry *pa, *pe;
+	int state = ACL_USER_OBJ;
+	int needs_mask = 0;
+
+	FOREACH_ACL_ENTRY(pa, acl, pe) {
+		if (pa->e_perm & ~(ACL_READ|ACL_WRITE|ACL_EXECUTE)) {
+			ksmbd_err("\n");
+			return -EINVAL;
+		}
+		switch (pa->e_tag) {
+			case ACL_USER_OBJ:
+				if (state == ACL_USER_OBJ) {
+					state = ACL_USER;
+					break;
+				}
+			ksmbd_err("\n");
+				return -EINVAL;
+
+			case ACL_USER:
+				if (state != ACL_USER) {
+			ksmbd_err("\n");
+					return -EINVAL;
+				}
+				if (!kuid_has_mapping(user_ns, pa->e_uid)) {
+			ksmbd_err("\n");
+					return -EINVAL;
+				}
+				needs_mask = 1;
+				break;
+
+			case ACL_GROUP_OBJ:
+				if (state == ACL_USER) {
+					state = ACL_GROUP;
+					break;
+				}
+			ksmbd_err("\n");
+				return -EINVAL;
+
+			case ACL_GROUP:
+				if (state != ACL_GROUP) {
+			ksmbd_err("\n");
+					return -EINVAL;
+				}
+				if (!kgid_has_mapping(user_ns, pa->e_gid)) {
+			ksmbd_err("\n");
+					return -EINVAL;
+				}
+				needs_mask = 1;
+				break;
+
+			case ACL_MASK:
+				if (state != ACL_GROUP) {
+			ksmbd_err("\n");
+					return -EINVAL;
+				}
+				state = ACL_OTHER;
+				break;
+
+			case ACL_OTHER:
+				if (state == ACL_OTHER ||
+						(state == ACL_GROUP && !needs_mask)) {
+					state = 0;
+					break;
+				}
+			ksmbd_err("\n");
+				return -EINVAL;
+
+			default:
+			ksmbd_err("\n");
+				return -EINVAL;
+		}
+	}
+	if (state == 0)
+		return 0;
+			ksmbd_err("\n");
+	return -EINVAL;
+}
+
+
 int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		struct posix_acl *acl)
 {
@@ -1419,6 +1593,7 @@ int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		return ret;
 	return inode->i_op->set_acl(inode, acl, type);
 #else
+	ksmbd_posix_acl_valid(inode->i_sb->s_user_ns, acl);
 	return set_posix_acl(inode, type, acl);
 #endif
 }
