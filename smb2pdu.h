@@ -8,6 +8,7 @@
 #define _SMB2PDU_H
 
 #include "ntlmssp.h"
+#include "smbacl.h"
 
 /*
  * Note that, due to trying to use names similar to the protocol specifications,
@@ -1491,6 +1492,12 @@ struct create_ea_buf_req {
 	struct create_context ccontext;
 	__u8   Name[8];
 	struct smb2_ea_info ea;
+} __packed;
+
+struct create_sd_buf_req {
+	struct create_context ccontext;
+	__u8   Name[8];
+	struct smb_ntsd ntsd;
 } __packed;
 
 /* functions */

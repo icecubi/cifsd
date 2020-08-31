@@ -2328,6 +2328,7 @@ int smb2_open(struct ksmbd_work *work)
 	u64 time;
 	umode_t posix_mode = 0;
 	__le32 daccess;
+	struct create_sd_buf_req *sd_buf = NULL;
 
 	rsp_org = RESPONSE_BUF(work);
 	WORK_BUFFERS(work, req, rsp);
@@ -2364,7 +2365,8 @@ int smb2_open(struct ksmbd_work *work)
 			goto err_out1;
 		}
 
-		ksmbd_debug(SMB, "converted name = %s\n", name);
+	//	ksmbd_debug(SMB, "converted name = %s\n", name);
+		ksmbd_err("converted name = %s\n", name);
 		if (strchr(name, ':')) {
 			if (!test_share_config_flag(work->tcon->share_conf,
 					KSMBD_SHARE_FLAG_STREAMS)) {
@@ -2807,8 +2809,7 @@ int smb2_open(struct ksmbd_work *work)
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
 
-	/* Write acls */
-	if (created) {
+	if (created) {	/* Write acls */
 		struct posix_acl_state acl_state;
 		struct posix_acl *acls;
 		struct inode *inode = FP_INODE(fp);
@@ -2869,6 +2870,62 @@ int smb2_open(struct ksmbd_work *work)
 		}
 		rc = 0;
 	}
+
+	if (req->CreateContextsOffset) {
+		/* Parse non-durable handle create contexts */
+		context = smb2_find_context_vals(req, SMB2_CREATE_SD_BUFFER);
+		if (IS_ERR(context)) {
+			rc = check_context_err(context, SMB2_CREATE_SD_BUFFER);
+			if (rc < 0)
+				goto err_out1;
+		} else {
+			struct inode *inode = FP_INODE(fp);
+			struct smb_fattr fattr = {0};
+			struct dentry *dentry = fp->filp->f_path.dentry;
+
+			sd_buf = (struct create_sd_buf_req *)context;
+			fattr.cf_uid = INVALID_UID;
+			fattr.cf_gid = INVALID_GID;
+			fattr.cf_mode = inode->i_mode & 07777;
+
+			rc = parse_sec_desc(&sd_buf->ntsd,
+					le32_to_cpu(sd_buf->ccontext.DataLength), &fattr);
+			if (rc) {
+				goto err_out;
+			}
+
+			inode->i_mode |= fattr.cf_mode & 07777;
+			if (!uid_eq(fattr.cf_uid, INVALID_UID))
+				inode->i_uid = fattr.cf_uid;
+			if (!gid_eq(fattr.cf_gid, INVALID_GID))
+				inode->i_gid = fattr.cf_gid;
+
+			//set acls
+			if (fattr.cf_dacls) {
+				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+			}
+
+			if (S_ISDIR(inode->i_mode) && fattr.cf_dacls) {
+				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+			}
+
+			ksmbd_vfs_remove_acl_xattrs(dentry);
+
+			// write xattr nacl
+			if (fattr.nt_acl) {
+				ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
+						fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+				kfree(fattr.nt_acl);
+			}
+			if (!rc)
+				mark_inode_dirty(inode);
+			posix_acl_release(fattr.cf_acls);
+			posix_acl_release(fattr.cf_dacls);
+			if (rc < 0) {
+				goto err_out;
+			}
+		}
+	} 
 
 	if (stream_name) {
 		rc = smb2_set_stream_name_xattr(&path,
@@ -3129,6 +3186,7 @@ err_out:
 		path_put(&path);
 	ksmbd_revert_fsids(work);
 err_out1:
+	ksmbd_err("rc : %d\n", rc);
 	if (rc) {
 		if (rc == -EINVAL)
 			rsp->hdr.Status = STATUS_INVALID_PARAMETER;
@@ -5743,10 +5801,6 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	struct inode *inode = FP_INODE(fp);
 	struct smb_fattr fattr = {0};
 	int rc;
-#if 0
-	char *name, *xattr_list = NULL;
-	int xattr_list_len, idx = 0, name_len;
-#endif
 	struct dentry *dentry = fp->filp->f_path.dentry;
 
 	fattr.cf_uid = INVALID_UID;
@@ -5771,18 +5825,6 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	if (S_ISDIR(inode->i_mode) && fattr.cf_dacls) {
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 	}
-
-#if 0
-	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
-	while (idx < xattr_list_len) {
-		name = xattr_list + idx;
-		name_len = strlen(name);
-
-		ksmbd_err( "xattr name : %s, len %d\n", name, name_len);
-
-		idx += name_len + 1;
-	}
-#endif
 
 	ksmbd_vfs_remove_acl_xattrs(dentry);
 

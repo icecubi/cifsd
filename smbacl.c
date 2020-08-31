@@ -235,7 +235,7 @@ void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid)
 
 static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr)
 {
-	int rc = 0;
+	int rc = -EINVAL;
 
 	/*
 	 * If we have too many subauthorities, then something is really wrong.
@@ -254,8 +254,10 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
 		if (id > 0) {
 			uid = make_kuid(&init_user_ns, id);
-			if (uid_valid(uid))
+			if (uid_valid(uid) && kuid_has_mapping(&init_user_ns, uid)) {
 				fattr->cf_uid = uid;
+				rc = 0;
+			}
 		}
 	} else {
 		kgid_t gid;
@@ -264,8 +266,10 @@ static int sid_to_id(struct smb_sid *psid, uint sidtype, struct smb_fattr *fattr
 		id = le32_to_cpu(psid->sub_auth[psid->num_subauth - 1]);
 		if (id > 0) {
 			gid = make_kgid(&init_user_ns, id);
-			if (gid_valid(gid))
+			if (gid_valid(gid) && kgid_has_mapping(&init_user_ns, gid)) {
 				fattr->cf_gid = gid;
+				rc = 0;
+			}
 		}
 	}
 
@@ -466,6 +470,10 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				goto skip;
 
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
+				mode = access_flags_to_mode(ppace[i]->access_req,
+						     ppace[i]->type);
+				goto skip;
+			} else if (!compare_sids(&(ppace[i]->sid), &sid_authusers)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
 				goto skip;
@@ -690,7 +698,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		if (rc) {
 			ksmbd_err("%s: Error %d mapping Owner SID to uid\n",
 					__func__, rc);
-			return rc;
+			owner_sid_ptr = NULL;
 		}
 	}
 
@@ -705,7 +713,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		if (rc) {
 			ksmbd_err("%s: Error %d mapping Group SID to gid\n",
 					__func__, rc);
-			return rc;
+			group_sid_ptr = NULL;
 		}
 	}
 
