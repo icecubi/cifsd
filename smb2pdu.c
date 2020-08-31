@@ -2667,7 +2667,7 @@ int smb2_open(struct ksmbd_work *work)
 
 	daccess = smb_map_generic_desired_access(req->DesiredAccess);
 
-	if (file_present && req->DesiredAccess & FILE_READ_CONTROL_LE) {
+	if (file_present && !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
 		struct smb_nt_acl *nt_acl;
 		int i;
 		struct smb_sid sid;
@@ -2680,6 +2680,9 @@ int smb2_open(struct ksmbd_work *work)
 				for (i = 0; i < nt_acl->num_aces; i++) {
 					granted |= nt_acl->ace[i].access_req;
 				}
+
+				if (!nt_acl->num_aces)
+					granted = GENERIC_ALL_FLAGS;
 			}
 
 			id_to_sid(sess->user->uid, SIDOWNER, &sid);
@@ -4937,6 +4940,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 		ksmbd_err("faild to load nt acl data\n");
 		return -ENOMEM;
 	}
+
 	rc = build_sec_desc(pntsd, addition_info, &secdesclen, &fattr);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
@@ -5783,13 +5787,15 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	ksmbd_vfs_remove_acl_xattrs(dentry);
 
 	// write xattr nacl
-	ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
-
+	if (fattr.nt_acl) {
+		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
+				fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+		kfree(fattr.nt_acl);
+	}
 	if (!rc)
 		mark_inode_dirty(inode);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
-	kfree(fattr.nt_acl);
 
 	return rc;
 }

@@ -338,7 +338,7 @@ void free_acl_state(struct posix_acl_state *state)
 }
 
 static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
-		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
+		struct smb_sid *pownersid, struct smb_sid *pgrpsid, unsigned short type,
 		struct smb_fattr *fattr)
 {
 	int i, ret;
@@ -383,6 +383,10 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			return;
 		fattr->nt_acl->num_aces = num_aces;
 		fattr->nt_acl->size = le16_to_cpu(pdacl->size);
+		if ((type & (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ)) ==
+			       (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ))
+			fattr->nt_acl->type = DACL_AUTO_INHERITED;
+		fattr->nt_acl->type |= type & DACL_PROTECTED ;
 
 		ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
 				      GFP_KERNEL);
@@ -707,7 +711,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 
 	if (dacloffset)
 		parse_dacl(dacl_ptr, end_of_acl, owner_sid_ptr, group_sid_ptr,
-			fattr);
+			le16_to_cpu(pntsd->type), fattr);
 	else
 		ksmbd_err("no ACL\n"); /* BB grant all or default perms? */
 
@@ -751,6 +755,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
 	pntsd->type = SELF_RELATIVE;
+	pntsd->type |= cpu_to_le16(fattr->nt_acl->type);
 
 	if (addition_info & OWNER_SECINFO) {
 		pntsd->osidoffset = cpu_to_le32(offset);
@@ -811,7 +816,10 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 		struct smb_ace *aces_base = aces;
 		const struct smb_sid *psid;
 		const struct smb_sid *creator = NULL;
-		int auto_inherited_flags = paces->type & DACL_AUTO_INHERITED;
+		int inherited_flags = 0;
+
+		if (p_nt_acl->type & DACL_AUTO_INHERITED)
+			inherited_flags = INHERITED_ACE;
 
 		for (i = 0; i < p_nt_acl->num_aces; i++) {
 			flags = paces->flags;
@@ -841,7 +849,7 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 			}
 
 			if (is_dir && creator && flags & CONTAINER_INHERIT_ACE) {
-				smb_set_ace(aces, psid, paces->type, auto_inherited_flags, paces->access_req);
+				smb_set_ace(aces, psid, paces->type, inherited_flags, paces->access_req);
 				nt_size += aces->size;
 				ace_n++;
 				aces = (struct smb_ace *)((char *)aces + aces->size);
@@ -850,7 +858,7 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 			} else if (is_dir && !(paces->flags & NO_PROPAGATE_INHERIT_ACE))
 				psid = &paces->sid;
 
-			smb_set_ace(aces, psid, paces->type, flags | auto_inherited_flags, paces->access_req);
+			smb_set_ace(aces, psid, paces->type, flags | inherited_flags, paces->access_req);
 			nt_size += aces->size;
 			aces = (struct smb_ace *)((char *)aces + aces->size);
 			ace_n++;
@@ -926,8 +934,8 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 		fattr->nt_acl->size += pace->size;
 
 		memcpy(fattr->nt_acl->ace, pace_base, fattr->nt_acl->size);
+		fattr->nt_acl->type = SELF_RELATIVE | DACL_PRESENT;
 	}
-	fattr->nt_acl->type = SELF_RELATIVE | DACL_PRESENT; 
 
 	return 0;
 }
