@@ -733,7 +733,7 @@ static int smb2_get_dos_mode(struct kstat *stat, int attribute)
 	attr = (attribute & 0x00005137) | ATTR_ARCHIVE;
 
 	if (S_ISDIR(stat->mode))
-		attr = ATTR_DIRECTORY;
+		attr |= ATTR_DIRECTORY;
 	else {
 		attr &= ~(ATTR_DIRECTORY);
 		if (S_ISREG(stat->mode) && (server_conf.share_fake_fscaps &
@@ -2676,8 +2676,10 @@ int smb2_open(struct ksmbd_work *work)
 		int found = 0;
 		int granted = (daccess & ~FILE_MAXIMAL_ACCESS_LE);
 
+		ksmbd_err("check acl\n");
 		nt_acl = ksmbd_vfs_get_sd_xattr(path.dentry);
 		if (nt_acl) {
+			ksmbd_err("daccess : %x, aces : %d\n", daccess, nt_acl->num_aces);
 			if (daccess & FILE_MAXIMAL_ACCESS_LE) {
 				for (i = 0; i < nt_acl->num_aces; i++) {
 					granted |= nt_acl->ace[i].access_req;
@@ -2816,6 +2818,7 @@ int smb2_open(struct ksmbd_work *work)
 		struct smb_fattr fattr;
 		struct smb_sid owner_sid, group_sid;
 
+		ksmbd_err("write default acl!\n");
 		init_acl_state(&acl_state, 1);
 
 		/* set owner group */
@@ -2888,6 +2891,7 @@ int smb2_open(struct ksmbd_work *work)
 			fattr.cf_gid = INVALID_GID;
 			fattr.cf_mode = inode->i_mode & 07777;
 
+			ksmbd_err("find sd buffer\n");
 			rc = parse_sec_desc(&sd_buf->ntsd,
 					le32_to_cpu(sd_buf->ccontext.DataLength), &fattr);
 			if (rc) {
@@ -2909,10 +2913,11 @@ int smb2_open(struct ksmbd_work *work)
 				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 			}
 
-			ksmbd_vfs_remove_acl_xattrs(dentry);
-
 			// write xattr nacl
 			if (fattr.nt_acl) {
+			ksmbd_err("delete acl for sd buffer\n");
+			ksmbd_vfs_remove_acl_xattrs(dentry);
+				ksmbd_err("write acl for sd buffer\n");
 				ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
 						fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 				kfree(fattr.nt_acl);
@@ -4982,6 +4987,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	if (!fp)
 		return -ENOENT;
 
+	ksmbd_err("s, filename : %s\n", fp->filename);
 	inode = FP_INODE(fp);
 	fattr.cf_uid = inode->i_uid;
 	fattr.cf_gid = inode->i_gid;
@@ -5004,6 +5010,7 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	posix_acl_release(fattr.cf_dacls);
 	kfree(fattr.nt_acl);
 	ksmbd_fd_put(work, fp);
+	ksmbd_err("e rc : %d\n", rc);
 	if (rc)
 		return rc;
 
@@ -5806,7 +5813,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
 	fattr.cf_mode = inode->i_mode & 07777;
-
+	ksmbd_err("s, filename : %s\n", fp->filename);
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
@@ -5836,6 +5843,7 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	}
 	if (!rc)
 		mark_inode_dirty(inode);
+	ksmbd_err("e, rc : %d\n", rc);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
 

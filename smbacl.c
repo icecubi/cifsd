@@ -342,7 +342,7 @@ void free_acl_state(struct posix_acl_state *state)
 }
 
 static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
-		struct smb_sid *pownersid, struct smb_sid *pgrpsid, unsigned short type,
+		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
 		struct smb_fattr *fattr)
 {
 	int i, ret;
@@ -371,27 +371,16 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 	acl_base = (char *)pdacl;
 	acl_size = sizeof(struct smb_acl);
+	fattr->nt_acl->size = le16_to_cpu(pdacl->size);
 
 	num_aces = le32_to_cpu(pdacl->num_aces);
 	if (num_aces > 0) {
-		int total_ace_size;
 		struct smb_ace *ace;
 
 		if (num_aces > ULONG_MAX / sizeof(struct smb_ace *))
 			return;
 
-		total_ace_size = le16_to_cpu(pdacl->size) - acl_size;
-		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) +
-				total_ace_size, GFP_KERNEL);
-		if (!fattr->nt_acl)
-			return;
 		fattr->nt_acl->num_aces = num_aces;
-		fattr->nt_acl->size = le16_to_cpu(pdacl->size);
-		if ((type & (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ)) ==
-			       (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ))
-			fattr->nt_acl->type = DACL_AUTO_INHERITED;
-		fattr->nt_acl->type |= type & DACL_PROTECTED ;
-
 		ppace = kmalloc_array(num_aces, sizeof(struct smb_ace *),
 				      GFP_KERNEL);
 		if (!ppace)
@@ -627,7 +616,8 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 
 out:
 	pndacl->num_aces = cpu_to_le32(num_aces);
-	pndacl->size = cpu_to_le16(size + sizeof(struct smb_acl));
+	ksmbd_err("num_aces : %d\n", num_aces);
+	pndacl->size += cpu_to_le16(size);
 }
 
 static int parse_sid(struct smb_sid *psid, char *end_of_acl)
@@ -671,6 +661,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 	struct smb_acl *dacl_ptr; /* no need for SACL ptr */
 	char *end_of_acl = ((char *)pntsd) + acl_len;
 	__u32 dacloffset;
+	int total_ace_size = 0;
 
 	if (pntsd == NULL)
 		return -EIO;
@@ -681,11 +672,17 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 			le32_to_cpu(pntsd->gsidoffset));
 	dacloffset = le32_to_cpu(pntsd->dacloffset);
 	dacl_ptr = (struct smb_acl *)((char *)pntsd + dacloffset);
-	ksmbd_debug(SMB,
+//	ksmbd_debug(SMB,
+	ksmbd_err(
 		"revision %d type 0x%x ooffset 0x%x goffset 0x%x sacloffset 0x%x dacloffset 0x%x\n",
 		 pntsd->revision, pntsd->type, le32_to_cpu(pntsd->osidoffset),
 		 le32_to_cpu(pntsd->gsidoffset),
 		 le32_to_cpu(pntsd->sacloffset), dacloffset);
+
+	if (!(le16_to_cpu(pntsd->type) & DACL_PRESENT)) {
+		ksmbd_err("dacl is not present!\n");
+		return rc;
+	}
 
 	if (pntsd->osidoffset) {
 		rc = parse_sid(owner_sid_ptr, end_of_acl);
@@ -717,14 +714,22 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		}
 	}
 
-	if (dacloffset)
-		parse_dacl(dacl_ptr, end_of_acl, owner_sid_ptr, group_sid_ptr,
-			le16_to_cpu(pntsd->type), fattr);
-	else
-		ksmbd_err("no ACL\n"); /* BB grant all or default perms? */
+	if (dacloffset && dacl_ptr)
+		total_ace_size = le16_to_cpu(dacl_ptr->size) - sizeof(struct smb_acl);
+	fattr->nt_acl = kzalloc(sizeof(struct smb_nt_acl) +
+			total_ace_size, GFP_KERNEL);
+	if (!fattr->nt_acl)
+		return -ENOMEM;
 
-	if (pntsd->type & DACL_AUTO_INHERITED) {
-		ksmbd_err("contain auto inherit!!\n");
+	if ((le16_to_cpu(pntsd->type) & (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ)) ==
+			(DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ))
+		fattr->nt_acl->type = DACL_AUTO_INHERITED;
+	fattr->nt_acl->type |= le16_to_cpu(pntsd->type) & DACL_PROTECTED;
+
+	ksmbd_err("dacloffset : %d\n", dacloffset);
+	if (dacloffset) {
+		parse_dacl(dacl_ptr, end_of_acl, owner_sid_ptr, group_sid_ptr,
+				fattr);
 	}
 
 	return rc;
@@ -780,14 +785,19 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	}
 
 	if (addition_info & DACL_SECINFO) {
-		dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);
-		dacl_ptr->revision = cpu_to_le16(2);
-		dacl_ptr->size = 0;
-		dacl_ptr->num_aces = 0;
 		pntsd->type |= DACL_PRESENT;
-		set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
-		pntsd->dacloffset = cpu_to_le32(offset);
-		offset += le16_to_cpu(dacl_ptr->size);
+		if (fattr->nt_acl->size > 0) {
+			ksmbd_err("fattr->nt_acl->size : %d, fattr->nt_acl->num_aces : %d\n", fattr->nt_acl->
+					size, fattr->nt_acl->num_aces);
+			dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);
+			dacl_ptr->revision = cpu_to_le16(2);
+			dacl_ptr->size = cpu_to_le16(sizeof(struct smb_acl));
+			dacl_ptr->num_aces = 0;
+			if (fattr->nt_acl->num_aces > 0)
+				set_dacl(dacl_ptr, nowner_sid_ptr, ngroup_sid_ptr, fattr);
+			pntsd->dacloffset = cpu_to_le32(offset);
+			offset += le16_to_cpu(dacl_ptr->size);
+		}
 	}
 
 	*secdesclen = offset;
@@ -811,13 +821,14 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 	__u32 access_req;
 	char *pace_base;
 	struct smb_nt_acl *p_nt_acl;
+	int nt_size = 0;
 
 	//get parent acl
 	p_nt_acl = ksmbd_vfs_get_sd_xattr(parent);
 	if (p_nt_acl) {
 		struct smb_ace *aces = kmalloc(sizeof(struct smb_ace) * p_nt_acl->num_aces * 2, GFP_KERNEL);
 		int flags = 0;
-		int nt_size = 0;
+	//	int nt_size = 0;
 		int i;
 		int ace_n = 0;
 		struct smb_ace *paces = p_nt_acl->ace;
@@ -826,6 +837,7 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 		const struct smb_sid *creator = NULL;
 		int inherited_flags = 0;
 
+		ksmbd_err("found parent acl!!\n");
 		if (p_nt_acl->type & DACL_AUTO_INHERITED)
 			inherited_flags = INHERITED_ACE;
 
@@ -873,6 +885,8 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 			paces = (struct smb_ace *)((char *)paces + paces->size);
 		}
 
+		fattr->nt_acl = NULL;
+		if (nt_size > 0) {
 		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + nt_size,
 				GFP_KERNEL);
 		if (!fattr->nt_acl)
@@ -884,10 +898,13 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 		fattr->nt_acl->size = nt_size;
 
 		memcpy(fattr->nt_acl->ace, aces_base, nt_size);
+		}
 		kfree(p_nt_acl);
 
-	} else {
-
+	}
+       
+	if (!nt_size)	{
+		ksmbd_err("just set default acls\n");
 		fattr->nt_acl = kmalloc(sizeof(struct smb_nt_acl) + num_aces * sizeof(struct smb_ace),
 				GFP_KERNEL);
 		if (!fattr->nt_acl)
