@@ -2329,6 +2329,7 @@ int smb2_open(struct ksmbd_work *work)
 	umode_t posix_mode = 0;
 	__le32 daccess;
 	struct create_sd_buf_req *sd_buf = NULL;
+	int sd_writed = 0;
 
 	rsp_org = RESPONSE_BUF(work);
 	WORK_BUFFERS(work, req, rsp);
@@ -2669,7 +2670,7 @@ int smb2_open(struct ksmbd_work *work)
 
 	daccess = smb_map_generic_desired_access(req->DesiredAccess);
 
-	if (file_present && !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
+	if (file_present && daccess & (FILE_READ_CONTROL_LE | FILE_MAXIMAL_ACCESS_LE)) { //&& !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
 		struct smb_nt_acl *nt_acl;
 		int i;
 		struct smb_sid sid;
@@ -2691,6 +2692,7 @@ int smb2_open(struct ksmbd_work *work)
 
 			id_to_sid(sess->user->uid, SIDOWNER, &sid);
 
+			ksmbd_err("1 nt_acl->size : %d, num aces : %d\n", nt_acl->size, nt_acl->num_aces);
 			if (nt_acl->num_aces) {
 				// check permission of fp dacesss with each ondisk dcal aces
 				for (i = 0; i < nt_acl->num_aces; i++) {
@@ -2713,6 +2715,12 @@ int smb2_open(struct ksmbd_work *work)
 				}
 
 				daccess |= granted;
+			} else if (nt_acl->size > 0) {
+				ksmbd_err("2 nt_acl->size : %d, num aces : %d\n", nt_acl->size, nt_acl->num_aces);
+				if (daccess & ~(FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE)) {
+					rc = -EACCES;
+					goto err_out;
+				}
 			}
 
 			kfree(nt_acl);
@@ -2811,6 +2819,7 @@ int smb2_open(struct ksmbd_work *work)
 	fp->saccess = req->ShareAccess;
 	fp->coption = req->CreateOptions;
 
+#if 0
 	if (created) {	/* Write acls */
 		struct posix_acl_state acl_state;
 		struct posix_acl *acls;
@@ -2873,6 +2882,7 @@ int smb2_open(struct ksmbd_work *work)
 		}
 		rc = 0;
 	}
+#endif
 
 	if (req->CreateContextsOffset) {
 		/* Parse non-durable handle create contexts */
@@ -2914,13 +2924,14 @@ int smb2_open(struct ksmbd_work *work)
 			}
 
 			// write xattr nacl
-			if (fattr.nt_acl) {
+			if (fattr.nt_acl->type & DACL_PRESENT) {
 			ksmbd_err("delete acl for sd buffer\n");
-			ksmbd_vfs_remove_acl_xattrs(dentry);
+			ksmbd_vfs_remove_sd_xattrs(dentry);
 				ksmbd_err("write acl for sd buffer\n");
 				ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
 						fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 				kfree(fattr.nt_acl);
+				sd_writed = 1;
 			}
 			if (!rc)
 				mark_inode_dirty(inode);
@@ -2930,7 +2941,70 @@ int smb2_open(struct ksmbd_work *work)
 				goto err_out;
 			}
 		}
-	} 
+	}
+
+	if (created && !sd_writed) {	/* Write acls */
+		struct posix_acl_state acl_state;
+		struct posix_acl *acls;
+		struct inode *inode = FP_INODE(fp);
+		struct smb_fattr fattr;
+		struct smb_sid owner_sid, group_sid;
+
+		ksmbd_err("write default acl!\n");
+		init_acl_state(&acl_state, 1);
+
+		/* set owner group */
+		acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
+		acl_state.group.allow = (inode->i_mode & 0070) >> 3;
+		acl_state.other.allow = inode->i_mode & 0007;
+		acl_state.users->aces[acl_state.users->n].uid = inode->i_uid;
+		acl_state.users->aces[acl_state.users->n++].perms.allow = acl_state.owner.allow;
+		acl_state.groups->aces[acl_state.groups->n].gid = inode->i_gid;
+		acl_state.groups->aces[acl_state.groups->n++].perms.allow = acl_state.group.allow;
+		acl_state.mask.allow = 0x07;
+
+		acls = posix_acl_alloc(6, GFP_KERNEL);
+
+		posix_state_to_acl(&acl_state, acls->a_entries);
+		free_acl_state(&acl_state);
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
+		
+		// write xattr nacl
+		fattr.cf_uid = inode->i_uid;
+		fattr.cf_gid = inode->i_gid;
+		fattr.cf_mode = inode->i_mode;
+
+		id_to_sid(sess->user->uid, SIDOWNER, &owner_sid);
+		id_to_sid(sess->user->gid, SIDGROUP, &group_sid);
+		smb2_set_default_nt_acl(&fattr, path.dentry->d_parent, S_ISDIR(inode->i_mode), &owner_sid, &group_sid);
+
+		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl, fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+		kfree(fattr.nt_acl);
+		posix_acl_release(acls);
+
+		if (S_ISDIR(inode->i_mode)) {
+			struct posix_acl_state default_acl_state;
+			struct posix_acl *dacls;
+
+			init_acl_state(&default_acl_state, 1);
+			default_acl_state.owner.allow = (inode->i_mode & 0700) >> 6;
+			default_acl_state.group.allow = 0;
+			default_acl_state.other.allow = 0;
+			default_acl_state.users->aces[default_acl_state.users->n].uid = inode->i_uid;
+			default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = default_acl_state.owner.allow;
+			default_acl_state.groups->aces[default_acl_state.groups->n].gid = inode->i_gid;
+			default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = default_acl_state.group.allow;
+			default_acl_state.mask.allow = 0x07;
+			dacls = posix_acl_alloc(6, GFP_KERNEL);
+			posix_state_to_acl(&default_acl_state, dacls->a_entries);
+			free_acl_state(&default_acl_state);
+
+			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, dacls);
+			posix_acl_release(dacls);
+			// write xattr nacl
+		}
+		rc = 0;
+	}
 
 	if (stream_name) {
 		rc = smb2_set_stream_name_xattr(&path,
@@ -5000,15 +5074,16 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 		fattr.cf_dacls = get_acl(inode, ACL_TYPE_DEFAULT);
 
 	fattr.nt_acl = ksmbd_vfs_get_sd_xattr(fp->filp->f_path.dentry);
-	if (!fattr.nt_acl) {
-		ksmbd_err("faild to load nt acl data\n");
-		return -ENOMEM;
-	}
+//	if (!fattr.nt_acl) {
+//		ksmbd_err("faild to load nt acl data\n");
+//		return -ENOMEM;
+//	}
 
 	rc = build_sec_desc(pntsd, addition_info, &secdesclen, &fattr);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
-	kfree(fattr.nt_acl);
+	if (fattr.nt_acl)
+		kfree(fattr.nt_acl);
 	ksmbd_fd_put(work, fp);
 	ksmbd_err("e rc : %d\n", rc);
 	if (rc)
@@ -5833,10 +5908,12 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 	}
 
-	ksmbd_vfs_remove_acl_xattrs(dentry);
-
+//	ksmbd_err("remove acls\n");
+//	ksmbd_vfs_remove_sd_xattrs(dentry);
 	// write xattr nacl
 	if (fattr.nt_acl) {
+	ksmbd_vfs_remove_sd_xattrs(dentry);
+		ksmbd_err("write acl\n");
 		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
 				fattr.nt_acl->size + sizeof(struct smb_nt_acl));
 		kfree(fattr.nt_acl);

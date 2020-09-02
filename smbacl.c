@@ -365,7 +365,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		return;
 	}
 
-	ksmbd_debug(SMB, "DACL revision %d size %d num aces %d\n",
+//	ksmbd_debug(SMB, "DACL revision %d size %d num aces %d\n",
+	ksmbd_err("DACL revision %d size %d num aces %d\n",
 		 le16_to_cpu(pdacl->revision), le16_to_cpu(pdacl->size),
 		 le32_to_cpu(pdacl->num_aces));
 
@@ -679,10 +680,19 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		 le32_to_cpu(pntsd->gsidoffset),
 		 le32_to_cpu(pntsd->sacloffset), dacloffset);
 
+	if (dacloffset && dacl_ptr)
+		total_ace_size = le16_to_cpu(dacl_ptr->size) - sizeof(struct smb_acl);
+	fattr->nt_acl = kzalloc(sizeof(struct smb_nt_acl) +
+			total_ace_size, GFP_KERNEL);
+	if (!fattr->nt_acl)
+		return -ENOMEM;
+
 	if (!(le16_to_cpu(pntsd->type) & DACL_PRESENT)) {
 		ksmbd_err("dacl is not present!\n");
 		return rc;
 	}
+
+	fattr->nt_acl->type = DACL_PRESENT;
 
 	if (pntsd->osidoffset) {
 		rc = parse_sid(owner_sid_ptr, end_of_acl);
@@ -714,16 +724,9 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		}
 	}
 
-	if (dacloffset && dacl_ptr)
-		total_ace_size = le16_to_cpu(dacl_ptr->size) - sizeof(struct smb_acl);
-	fattr->nt_acl = kzalloc(sizeof(struct smb_nt_acl) +
-			total_ace_size, GFP_KERNEL);
-	if (!fattr->nt_acl)
-		return -ENOMEM;
-
 	if ((le16_to_cpu(pntsd->type) & (DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ)) ==
 			(DACL_AUTO_INHERITED | DACL_AUTO_INHERIT_REQ))
-		fattr->nt_acl->type = DACL_AUTO_INHERITED;
+		fattr->nt_acl->type |= DACL_AUTO_INHERITED;
 	fattr->nt_acl->type |= le16_to_cpu(pntsd->type) & DACL_PROTECTED;
 
 	ksmbd_err("dacloffset : %d\n", dacloffset);
@@ -768,9 +771,11 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
 	pntsd->type = SELF_RELATIVE;
-	pntsd->type |= cpu_to_le16(fattr->nt_acl->type);
+	if (fattr->nt_acl)
+		pntsd->type |= cpu_to_le16(fattr->nt_acl->type);
 
 	if (addition_info & OWNER_SECINFO) {
+		ksmbd_err("owner secinfo\n");
 		pntsd->osidoffset = cpu_to_le32(offset);
 		owner_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
 		smb_copy_sid(owner_sid_ptr, nowner_sid_ptr);
@@ -778,6 +783,7 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 	}
 
 	if (addition_info & GROUP_SECINFO) {
+		ksmbd_err("group secinfo\n");
 		pntsd->gsidoffset = cpu_to_le32(offset);
 		group_sid_ptr = (struct smb_sid *)((char *)pntsd + offset);
 		smb_copy_sid(group_sid_ptr, ngroup_sid_ptr);
@@ -786,7 +792,8 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 
 	if (addition_info & DACL_SECINFO) {
 		pntsd->type |= DACL_PRESENT;
-		if (fattr->nt_acl->size > 0) {
+		ksmbd_err("acl secinfo\n");
+		if (fattr->nt_acl && fattr->nt_acl->size > 0) {
 			ksmbd_err("fattr->nt_acl->size : %d, fattr->nt_acl->num_aces : %d\n", fattr->nt_acl->
 					size, fattr->nt_acl->num_aces);
 			dacl_ptr = (struct smb_acl *)((char *)pntsd + offset);

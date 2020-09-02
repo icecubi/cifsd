@@ -1433,17 +1433,21 @@ int ksmbd_vfs_remove_sd_xattrs(struct dentry *dentry)
 
 	xattr_list_len = ksmbd_vfs_listxattr(dentry, &xattr_list);
 	if (xattr_list_len < 0) {
+		ksmbd_err("xattr_list_len : %zd\n", xattr_list_len);
 		goto out;
 	} else if (!xattr_list_len) {
-		ksmbd_debug(SMB, "empty xattr in the file\n");
+		//ksmbd_debug(SMB, "empty xattr in the file\n");
+		ksmbd_err("empty xattr in the file\n");
 		goto out;
 	}
 
 	for (name = xattr_list; name - xattr_list < xattr_list_len;
 			name += strlen(name) + 1) {
-		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
+	//	ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
+		ksmbd_err("%s, len %zd\n", name, strlen(name));
 
 		if (!strncmp(name, XATTR_NAME_SD, XATTR_NAME_SD_LEN)) {
+				ksmbd_err("remove xattr: %s\n", name);
 			err = ksmbd_vfs_remove_xattr(dentry, name);
 			if (err)
 				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);
@@ -1458,8 +1462,6 @@ int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size)
 {
 	struct dentry *dentry = fp->filp->f_path.dentry;
 	int rc;
-
-	ksmbd_vfs_remove_sd_xattrs(dentry);
 
 	rc = ksmbd_vfs_setxattr(dentry, XATTR_NAME_SD, sd_data, size, 0);
 	if (rc < 0)
@@ -1480,7 +1482,6 @@ struct smb_nt_acl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
 
 		memcpy(sd_data, attr, rc);
 	}
-
 	ksmbd_free(attr);
 	return (struct smb_nt_acl *)sd_data;
 }
