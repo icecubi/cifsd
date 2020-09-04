@@ -2670,7 +2670,10 @@ int smb2_open(struct ksmbd_work *work)
 
 	daccess = smb_map_generic_desired_access(req->DesiredAccess);
 
-	if (file_present && daccess & (FILE_READ_CONTROL_LE | FILE_MAXIMAL_ACCESS_LE)) { //&& !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
+	if (file_present 
+			//&& daccess & (FILE_READ_ATTRIBUTES_LE | FILE_MAXIMAL_ACCESS_LE)) {
+			
+			&& !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
 		struct smb_nt_acl *nt_acl;
 		int i;
 		struct smb_sid sid;
@@ -2703,12 +2706,14 @@ int smb2_open(struct ksmbd_work *work)
 				}
 
 				if (!found) {
+					ksmbd_err("\n");
 					rc = -EACCES;
 					kfree(nt_acl);
 					goto err_out;
 				}
 
-				if (granted & ~(nt_acl->ace[i].access_req | FILE_READ_ATTRIBUTES_LE)) {
+				if (granted & ~(nt_acl->ace[i].access_req | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
+					ksmbd_err("granted : %x, access_req : %x\n",granted, (nt_acl->ace[i].access_req | FILE_READ_ATTRIBUTES_LE));
 					rc = -EACCES;
 					kfree(nt_acl);
 					goto err_out;
@@ -2765,6 +2770,7 @@ int smb2_open(struct ksmbd_work *work)
 				open_flags & O_ACCMODE,
 				req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
 			rc = -EACCES;
+					ksmbd_err("\n");
 			goto err_out;
 		}
 	}
