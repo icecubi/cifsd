@@ -450,7 +450,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						ppace[i]->type);
-				acl_state.other.allow = mode & 0007;
+				acl_state.other.allow |= mode & 0007;
 				mode &= 0007;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,

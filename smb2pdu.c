@@ -5813,12 +5813,11 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
-	fattr.cf_mode = inode->i_mode & 07777;
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
 
-	inode->i_mode |= fattr.cf_mode & 07777;
+	inode->i_mode = (inode->i_mode & ~0777) | (fattr.cf_mode & 0777);
 	if (!uid_eq(fattr.cf_uid, INVALID_UID))
 		inode->i_uid = fattr.cf_uid;
 	if (!gid_eq(fattr.cf_gid, INVALID_GID))
@@ -5842,7 +5841,6 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		mark_inode_dirty(inode);
 	posix_acl_release(fattr.cf_acls);
 	posix_acl_release(fattr.cf_dacls);
-
 	return rc;
 }
 
