@@ -2782,7 +2782,6 @@ int smb2_open(struct ksmbd_work *work)
 				open_flags & O_ACCMODE,
 				req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
 			rc = -EACCES;
-					ksmbd_err("\n");
 			goto err_out;
 		}
 	}
@@ -5813,11 +5812,11 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 
 	fattr.cf_uid = INVALID_UID;
 	fattr.cf_gid = INVALID_GID;
+	fattr.cf_mode = inode->i_mode & 0777;
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
-
-	inode->i_mode = (inode->i_mode & ~0777) | (fattr.cf_mode & 0777);
+	inode->i_mode = (inode->i_mode & ~0777)  | (fattr.cf_mode & 0777);
 	if (!uid_eq(fattr.cf_uid, INVALID_UID))
 		inode->i_uid = fattr.cf_uid;
 	if (!gid_eq(fattr.cf_gid, INVALID_GID))

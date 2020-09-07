@@ -409,7 +409,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		 * Also, if num_aces is 0 i.e. DACL has no ACEs,
 		 * user/group/other have no permissions
 		 */
-		fattr->cf_mode &= ~(0777);
 		ace = fattr->nt_acl->ace;
 		for (i = 0; i < num_aces; ++i) {
 			ppace[i] = (struct smb_ace *) (acl_base + acl_size);
@@ -484,6 +483,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				}
 			}
 
+			fattr->cf_mode &= ~(mode);
 			fattr->cf_mode |= mode;
 skip:
 			acl_base = (char *)ppace[i];
