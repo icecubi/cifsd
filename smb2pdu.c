@@ -2868,11 +2868,10 @@ int smb2_open(struct ksmbd_work *work)
 
 			//set acls
 			if (fattr.cf_dacls) {
+				ksmbd_vfs_remove_acl_xattrs(dentry);
 				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
-			}
-
-			if (S_ISDIR(inode->i_mode) && fattr.cf_dacls) {
-				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+				if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
+					rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
 			}
 
 			// write xattr nacl
@@ -5823,11 +5822,12 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 		inode->i_gid = fattr.cf_gid;
 
 	//set acls
-	if (fattr.cf_dacls)
+	if (fattr.cf_dacls) {
+		ksmbd_vfs_remove_acl_xattrs(dentry);
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
-
-	if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
-		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+		if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
+			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+	}
 
 	// write xattr nacl
 	if (fattr.nt_acl) {
