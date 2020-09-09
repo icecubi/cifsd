@@ -2780,7 +2780,8 @@ int smb2_open(struct ksmbd_work *work)
 	} else {
 		if (ksmbd_vfs_inode_permission(path.dentry,
 				open_flags & O_ACCMODE,
-				req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
+				req->CreateOptions & FILE_DELETE_ON_CLOSE_LE) &&
+				!(req->DesiredAccess & FILE_MAXIMAL_ACCESS_LE)) {
 			rc = -EACCES;
 			goto err_out;
 		}

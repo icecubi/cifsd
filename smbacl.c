@@ -139,7 +139,9 @@ static umode_t access_flags_to_mode(__le32 ace_flags, int type)
 		return mode;
 	}
 
-	mode = 0444;
+	if ((flags & GENERIC_READ) ||
+			(flags & FILE_READ_RIGHTS))
+		mode = 0444;
 	if ((flags & GENERIC_WRITE) ||
 			(flags & FILE_WRITE_RIGHTS))
 		mode |= 0222;
