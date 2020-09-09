@@ -297,7 +297,7 @@ void posix_state_to_acl(struct posix_acl_state *state, struct posix_acl_entry *p
 			pace++;
 			pace->e_tag = ACL_GROUP;
 			pace->e_gid = state->users->aces[i].gid;
-			pace->e_perm = state->users->aces[i].perms.allow;
+			pace->e_perm = state->groups->aces[i].perms.allow;
 		}
 
 		if (state->users->n || state->groups->n) {
@@ -345,7 +345,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
 		struct smb_fattr *fattr)
 {
-	int i, ret;
+	int i, j, ret;
 	int num_aces = 0;
 	int acl_size;
 	char *acl_base;
@@ -419,13 +419,20 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					  &sid_unix_NFS_mode) == 0)) {
 				fattr->cf_mode =
 					le32_to_cpu(ppace[i]->sid.sub_auth[2]);
-				goto skip;
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
 				acl_state.owner.allow = mode & 0700 >> 6;
 
 				fattr->daccess = ace->access_req;
+
+				for (j = 0; j < acl_state.users->n; j++) {
+					if (uid_eq(acl_state.users->aces[j].uid, fattr->cf_uid)) {
+						acl_state.users->aces[j].perms.allow = mode & 0070 >> 3;
+						goto skip3;
+					}
+				}
+#if 1
 				acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
 				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 
@@ -433,36 +440,49 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				default_acl_state.owner.allow = mode & 0700 >> 6;
 				default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
 				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
+#endif
+skip3:
 				mode &= 0700;
+				fattr->cf_mode &= ~(0700);
+				fattr->cf_mode |= mode;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid) ||
 					le32_to_cpu(ppace[i]->sid.sub_auth[ppace[i]->sid.num_subauth - 1]) == 513) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
 				acl_state.group.allow = mode & 0070 >> 3;
+
+				for (j = 0; j < acl_state.groups->n; j++) {
+					if (gid_eq(acl_state.groups->aces[j].gid, fattr->cf_gid)) {
+						acl_state.groups->aces[j].perms.allow = mode & 0070 >> 3;
+						goto skip2;
+					}
+				}
+
+#if 1
 				acl_state.groups->aces[acl_state.groups->n].gid = fattr->cf_gid;
 				acl_state.groups->aces[acl_state.groups->n++].perms.allow = mode & 0070 >> 3;
 
 				/* default acl */
 				default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
 				default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = 0;
+#endif
+skip2:
 				mode &= 0070;
+				fattr->cf_mode &= ~(0070);
+				fattr->cf_mode |= mode;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						ppace[i]->type);
-				acl_state.other.allow |= mode & 0007;
+				acl_state.other.allow = mode & 0007;
+				//ksmbd_err("acl_state.other.allow : %o\n", acl_state.other.allow);
 				mode &= 0007;
+				fattr->cf_mode &= ~(0007);
+				fattr->cf_mode |= mode;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
-				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
 				goto skip;
-
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
-				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
 				goto skip;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_authusers)) {
-				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
 				goto skip;
 			} else {
 				struct smb_fattr temp_fattr;
@@ -477,14 +497,11 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					goto skip;
 				} else {
 					fattr->daccess = ace->access_req;
-					acl_state.owner.allow = mode & 0700 >> 6;
 					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
 					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 				}
 			}
 
-			fattr->cf_mode &= ~(mode);
-			fattr->cf_mode |= mode;
 skip:
 			acl_base = (char *)ppace[i];
 			acl_size = le16_to_cpu(ppace[i]->size);
@@ -492,7 +509,6 @@ skip:
 		}
 		kfree(ppace);
 
-		num_aces = 4 + acl_state.users->n + acl_state.groups->n;
 		if (acl_state.users->n || acl_state.groups->n) {
 			acl_state.mask.allow = 0x07;
 			fattr->cf_acls = posix_acl_alloc(4 + acl_state.users->n + acl_state.groups->n, GFP_KERNEL);
