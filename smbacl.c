@@ -666,6 +666,8 @@ static void set_dacl2(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDGROUP, sid);
+		} else if (pace->e_tag == ACL_OTHER) {
+			smb_copy_sid(sid, &sid_everyone);
 		} else {
 			kfree(sid);
 			continue;
@@ -702,7 +704,6 @@ static void set_dacl2(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDCREATOR_GROUP, sid);
 		} else if (pace->e_tag == ACL_OTHER) {
-
 			smb_copy_sid(sid, &sid_everyone);
 		} else {
 			kfree(sid);
