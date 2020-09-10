@@ -397,15 +397,6 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			return;
 		}
 
-		/* set owner group */
-		acl_state.owner.allow = (fattr->cf_mode & 0700) >> 6;
-		acl_state.group.allow = (fattr->cf_mode & 0070) >> 3;
-		acl_state.other.allow = fattr->cf_mode & 0007;
-
-		default_acl_state.owner.allow = fattr->cf_mode;
-		default_acl_state.group.allow = 0;
-		default_acl_state.other.allow = 0;
-
 		/*
 		 * reset rwx permissions for user/group/other.
 		 * Also, if num_aces is 0 i.e. DACL has no ACEs,
@@ -424,8 +415,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						     ppace[i]->type);
-				acl_state.owner.allow = mode & 0700 >> 6;
-
+				/* The owner must be set to at least read-only. */
+				acl_state.owner.allow = (mode & 0700 >> 6) | 0004;
 				fattr->daccess = ace->access_req;
 
 				for (j = 0; j < acl_state.users->n; j++) {
