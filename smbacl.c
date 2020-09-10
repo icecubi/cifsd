@@ -149,6 +149,9 @@ static umode_t access_flags_to_mode(__le32 ace_flags, int type)
 			(flags & FILE_EXEC_RIGHTS))
 		mode |= 0111;
 
+	if (type == ACCESS_DENIED_ACE_TYPE || type == ACCESS_DENIED_OBJECT_ACE_TYPE)
+	       mode = ~(mode);
+
 	ksmbd_debug(SMB, "access flags 0x%x mode now %04o\n", flags, mode);
 
 	return mode;
@@ -414,18 +417,22 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					le32_to_cpu(ppace[i]->sid.sub_auth[2]);
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
+						ppace[i]->type);
+				mode &= 0700;
+				fattr->cf_mode &= ~(0700);
+				fattr->cf_mode |= mode;
+
 				/* The owner must be set to at least read-only. */
-				acl_state.owner.allow = (mode & 0700 >> 6) | 0004;
+				acl_state.owner.allow = (mode >> 6) | 0004;
 				fattr->daccess = ace->access_req;
 
 				for (j = 0; j < acl_state.users->n; j++) {
 					if (uid_eq(acl_state.users->aces[j].uid, fattr->cf_uid)) {
 						acl_state.users->aces[j].perms.allow = mode & 0070 >> 3;
-						goto skip3;
+						goto skip;
 					}
 				}
-#if 1
+
 				acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
 				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 
@@ -433,44 +440,35 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				default_acl_state.owner.allow = mode & 0700 >> 6;
 				default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
 				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
-#endif
-skip3:
-				mode &= 0700;
-				fattr->cf_mode &= ~(0700);
-				fattr->cf_mode |= mode;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid) ||
 					le32_to_cpu(ppace[i]->sid.sub_auth[ppace[i]->sid.num_subauth - 1]) == 513) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
-				acl_state.group.allow = mode & 0070 >> 3;
+						ppace[i]->type);
+				mode &= 0070;
+				fattr->cf_mode &= ~(0070);
+				fattr->cf_mode |= mode;
+				acl_state.group.allow = mode >> 3;
 
 				for (j = 0; j < acl_state.groups->n; j++) {
 					if (gid_eq(acl_state.groups->aces[j].gid, fattr->cf_gid)) {
 						acl_state.groups->aces[j].perms.allow = mode & 0070 >> 3;
-						goto skip2;
+						goto skip;
 					}
 				}
 
-#if 1
 				acl_state.groups->aces[acl_state.groups->n].gid = fattr->cf_gid;
 				acl_state.groups->aces[acl_state.groups->n++].perms.allow = mode & 0070 >> 3;
 
 				/* default acl */
 				default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
 				default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = 0;
-#endif
-skip2:
-				mode &= 0070;
-				fattr->cf_mode &= ~(0070);
-				fattr->cf_mode |= mode;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						ppace[i]->type);
-				acl_state.other.allow = mode & 0007;
-				//ksmbd_err("acl_state.other.allow : %o\n", acl_state.other.allow);
 				mode &= 0007;
 				fattr->cf_mode &= ~(0007);
 				fattr->cf_mode |= mode;
+				acl_state.other.allow = mode;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
 				goto skip;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
@@ -481,7 +479,7 @@ skip2:
 				struct smb_fattr temp_fattr;
 
 				mode = access_flags_to_mode(ppace[i]->access_req,
-						     ppace[i]->type);
+						ppace[i]->type);
 				temp_fattr.cf_uid = INVALID_UID;
 				ret = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
 				if (ret || uid_eq(temp_fattr.cf_uid, INVALID_UID)) {

@@ -2692,6 +2692,8 @@ int smb2_open(struct ksmbd_work *work)
 
 			if (nt_acl->num_aces) {
 				struct smb_ace *ace = nt_acl->ace;
+				__le32 access_bits = 0;
+
 				// check permission of fp dacesss with each ondisk dcal aces
 				for (i = 0; i < nt_acl->num_aces; i++) {
 #if 0
@@ -2725,7 +2727,17 @@ int smb2_open(struct ksmbd_work *work)
 					goto err_out;
 				}
 
-				if (granted & ~(ace->access_req | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
+				switch (ace->type) {
+				case ACCESS_ALLOWED_ACE_TYPE:
+					access_bits = ace->access_req;
+					break;
+				case ACCESS_DENIED_ACE_TYPE:
+				case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+					access_bits = ~ace->access_req;
+					break;
+				}
+
+				if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
 					ksmbd_debug(SMB, "ACLs Access denied, granted : %x, access_req : %x\n", granted, (ace->access_req | FILE_READ_ATTRIBUTES_LE));
 					rc = -EACCES;
 					kfree(nt_acl);
