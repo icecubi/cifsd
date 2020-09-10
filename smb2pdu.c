@@ -2696,24 +2696,24 @@ int smb2_open(struct ksmbd_work *work)
 
 				// check permission of fp dacesss with each ondisk dcal aces
 				for (i = 0; i < nt_acl->num_aces; i++) {
-#if 0
-					int j;
-					struct smb_sid *sid2 = &ace->sid;
-					ksmbd_err("2 SID revision %d num_auth %d\n",
-							sid2->revision, sid2->num_subauth);
-
-					for (j = 0; j < sid2->num_subauth; j++) {
-						ksmbd_err("2 SID sub_auth[%d]: 0x%x\n",
-								j, le32_to_cpu(sid2->sub_auth[j]));
-					}
-
-					/* BB add length check to make sure that we do not have huge
-					 *                         num auths and therefore go off the end */
-					ksmbd_err("2 RID 0x%x\n",
-							le32_to_cpu(sid2->sub_auth[sid2->num_subauth-1]));
-
-#endif
 					if (!compare_sids(&sid, &ace->sid)) {
+						switch (ace->type) {
+							case ACCESS_ALLOWED_ACE_TYPE:
+								access_bits = ace->access_req;
+								break;
+							case ACCESS_DENIED_ACE_TYPE:
+							case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+								access_bits = ~ace->access_req;
+								break;
+						}
+
+						if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
+							ksmbd_debug(SMB, "ACLs Access denied, granted : %x, access_req : %x\n", granted, (ace->access_req | FILE_READ_ATTRIBUTES_LE));
+							rc = -EACCES;
+							kfree(nt_acl);
+							goto err_out;
+						}
+
 						found = 1;
 						break;
 					}
@@ -2722,23 +2722,6 @@ int smb2_open(struct ksmbd_work *work)
 
 				if (!found) {
 					ksmbd_debug(SMB, "Not found sid\n");
-					rc = -EACCES;
-					kfree(nt_acl);
-					goto err_out;
-				}
-
-				switch (ace->type) {
-				case ACCESS_ALLOWED_ACE_TYPE:
-					access_bits = ace->access_req;
-					break;
-				case ACCESS_DENIED_ACE_TYPE:
-				case ACCESS_DENIED_CALLBACK_ACE_TYPE:
-					access_bits = ~ace->access_req;
-					break;
-				}
-
-				if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
-					ksmbd_debug(SMB, "ACLs Access denied, granted : %x, access_req : %x\n", granted, (ace->access_req | FILE_READ_ATTRIBUTES_LE));
 					rc = -EACCES;
 					kfree(nt_acl);
 					goto err_out;
@@ -5826,7 +5809,8 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 	rc = parse_sec_desc(pntsd, buf_len, &fattr);
 	if (rc)
 		return rc;
-	inode->i_mode = (inode->i_mode & ~0777)  | (fattr.cf_mode & 0777);
+	inode->i_mode = (inode->i_mode & ~0777) | (fattr.cf_mode & 0777);
+
 	if (!uid_eq(fattr.cf_uid, INVALID_UID))
 		inode->i_uid = fattr.cf_uid;
 	if (!gid_eq(fattr.cf_gid, INVALID_GID))

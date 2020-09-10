@@ -415,6 +415,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 					  &sid_unix_NFS_mode) == 0)) {
 				fattr->cf_mode =
 					le32_to_cpu(ppace[i]->sid.sub_auth[2]);
+				break;
 			} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						ppace[i]->type);
@@ -428,16 +429,16 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 				for (j = 0; j < acl_state.users->n; j++) {
 					if (uid_eq(acl_state.users->aces[j].uid, fattr->cf_uid)) {
-						acl_state.users->aces[j].perms.allow = mode & 0070 >> 3;
+						acl_state.users->aces[j].perms.allow = mode >> 6;
 						goto skip;
 					}
 				}
 
 				acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
-				acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
+				acl_state.users->aces[acl_state.users->n++].perms.allow = mode >> 6;
 
 				/* default acl */
-				default_acl_state.owner.allow = mode & 0700 >> 6;
+				default_acl_state.owner.allow = mode >> 6;
 				default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
 				default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
 			} else if (!compare_sids(&(ppace[i]->sid), pgrpsid) ||
@@ -451,13 +452,13 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 				for (j = 0; j < acl_state.groups->n; j++) {
 					if (gid_eq(acl_state.groups->aces[j].gid, fattr->cf_gid)) {
-						acl_state.groups->aces[j].perms.allow = mode & 0070 >> 3;
+						acl_state.groups->aces[j].perms.allow = mode >> 3;
 						goto skip;
 					}
 				}
 
 				acl_state.groups->aces[acl_state.groups->n].gid = fattr->cf_gid;
-				acl_state.groups->aces[acl_state.groups->n++].perms.allow = mode & 0070 >> 3;
+				acl_state.groups->aces[acl_state.groups->n++].perms.allow = mode >> 3;
 
 				/* default acl */
 				default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
@@ -489,7 +490,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				} else {
 					fattr->daccess = ace->access_req;
 					acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
-					acl_state.users->aces[acl_state.users->n++].perms.allow = mode & 0700 >> 6;
+					acl_state.users->aces[acl_state.users->n++].perms.allow = mode >> 6;
 				}
 			}
 
