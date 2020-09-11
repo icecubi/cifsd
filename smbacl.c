@@ -962,6 +962,8 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 		}
 	}
 
+	kfree(nowner_sid_ptr);
+	kfree(ngroup_sid_ptr);
 	*secdesclen = offset;
 	return rc;
 }
