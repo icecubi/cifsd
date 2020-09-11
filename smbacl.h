@@ -187,5 +187,6 @@ int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool
 void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid);
 int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid);
 bool smb_inherit_flags(int flags, bool is_dir);
+int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid);
 
 #endif /* _SMBACL_H */

@@ -2290,6 +2290,52 @@ static int smb2_creat(struct ksmbd_work *work,
 	return 0;
 }
 
+static int smb2_set_acl(struct ksmbd_file *fp, struct smb_ntsd *pntsd, int ntsd_len,
+		bool type_check)
+{
+	int rc;
+	struct smb_fattr fattr = {0};
+	struct dentry *dentry = fp->filp->f_path.dentry;
+	struct inode *inode = FP_INODE(fp);
+
+	fattr.cf_uid = INVALID_UID;
+	fattr.cf_gid = INVALID_GID;
+	fattr.cf_mode = inode->i_mode & 07777;
+
+	rc = parse_sec_desc(pntsd, ntsd_len, &fattr);
+	if (rc)
+		return rc;
+
+	inode->i_mode |= fattr.cf_mode & 07777;
+	if (!uid_eq(fattr.cf_uid, INVALID_UID))
+		inode->i_uid = fattr.cf_uid;
+	if (!gid_eq(fattr.cf_gid, INVALID_GID))
+		inode->i_gid = fattr.cf_gid;
+	mark_inode_dirty(inode);
+
+	/* Update posix acls */
+	if (fattr.cf_dacls) {
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
+		if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
+			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
+	}
+
+	/* Check it only calling from SD BUFFER context */
+	if (type_check && !(fattr.nt_acl->type & DACL_PRESENT))
+      		goto out; 
+
+	/* Update WinACL in xattr */
+	ksmbd_vfs_remove_sd_xattrs(dentry);
+	ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
+		fattr.nt_acl->size + sizeof(struct smb_nt_acl));
+
+out:
+	posix_acl_release(fattr.cf_acls);
+	posix_acl_release(fattr.cf_dacls);
+	kfree(fattr.nt_acl);
+	return rc;
+}
+
 /**
  * smb2_open() - handler for smb file open request
  * @work:	smb work containing request buffer
@@ -2670,73 +2716,9 @@ int smb2_open(struct ksmbd_work *work)
 	daccess = smb_map_generic_desired_access(req->DesiredAccess);
 
 	if (file_present && !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
-		struct smb_nt_acl *nt_acl;
-		int i;
-		struct smb_sid sid;
-		int found = 0;
-		int granted = (daccess & ~FILE_MAXIMAL_ACCESS_LE);
-
-		ksmbd_debug(SMB, "check acl\n");
-		nt_acl = ksmbd_vfs_get_sd_xattr(path.dentry);
-		if (nt_acl) {
-			if (daccess & FILE_MAXIMAL_ACCESS_LE) {
-				for (i = 0; i < nt_acl->num_aces; i++) {
-					granted |= nt_acl->ace[i].access_req;
-				}
-
-				if (!nt_acl->num_aces)
-					granted = GENERIC_ALL_FLAGS;
-			}
-
-			id_to_sid(sess->user->uid, SIDOWNER, &sid);
-
-			if (nt_acl->num_aces) {
-				struct smb_ace *ace = nt_acl->ace;
-				__le32 access_bits = 0;
-
-				// check permission of fp dacesss with each ondisk dcal aces
-				for (i = 0; i < nt_acl->num_aces; i++) {
-					if (!compare_sids(&sid, &ace->sid)) {
-						switch (ace->type) {
-							case ACCESS_ALLOWED_ACE_TYPE:
-								access_bits = ace->access_req;
-								break;
-							case ACCESS_DENIED_ACE_TYPE:
-							case ACCESS_DENIED_CALLBACK_ACE_TYPE:
-								access_bits = ~ace->access_req;
-								break;
-						}
-
-						if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE | FILE_READ_CONTROL_LE)) {
-							ksmbd_debug(SMB, "ACLs Access denied, granted : %x, access_req : %x\n", granted, (ace->access_req | FILE_READ_ATTRIBUTES_LE));
-							rc = -EACCES;
-							kfree(nt_acl);
-							goto err_out;
-						}
-
-						found = 1;
-						break;
-					}
-					ace = (struct smb_ace *) ((char *)ace + ace->size);
-				}
-
-				if (!found) {
-					ksmbd_debug(SMB, "Not found sid\n");
-					rc = -EACCES;
-					kfree(nt_acl);
-					goto err_out;
-				}
-
-				daccess |= granted;
-			} else if (nt_acl->size > 0) {
-				if (daccess & ~(FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE)) {
-					rc = -EACCES;
-					goto err_out;
-				}
-			}
-
-			kfree(nt_acl);
-		}
+		rc = smb_check_perm_win_acl(path.dentry, &daccess, sess->user->uid);
+		if (rc)
+			goto err_out;
 	}
 
 	open_flags = smb2_create_open_flags(file_present,
@@ -2832,57 +2814,21 @@ int smb2_open(struct ksmbd_work *work)
 	fp->coption = req->CreateOptions;
 
 	if (req->CreateContextsOffset) {
-		/* Parse non-durable handle create contexts */
+		/* Parse SD BUFFER create contexts */
 		context = smb2_find_context_vals(req, SMB2_CREATE_SD_BUFFER);
 		if (IS_ERR(context)) {
 			rc = check_context_err(context, SMB2_CREATE_SD_BUFFER);
 			if (rc < 0)
 				goto err_out1;
 		} else {
-			struct inode *inode = FP_INODE(fp);
-			struct smb_fattr fattr = {0};
-			struct dentry *dentry = fp->filp->f_path.dentry;
+			ksmbd_debug(SMB, "Set ACLs using SMB2_CREATE_SD_BUFFER context\n");
 
 			sd_buf = (struct create_sd_buf_req *)context;
-			fattr.cf_uid = INVALID_UID;
-			fattr.cf_gid = INVALID_GID;
-			fattr.cf_mode = inode->i_mode & 07777;
-
-			ksmbd_debug(SMB, "find sd buffer\n");
-			rc = parse_sec_desc(&sd_buf->ntsd,
-					le32_to_cpu(sd_buf->ccontext.DataLength), &fattr);
-			if (rc) {
+			rc = smb2_set_acl(fp, &sd_buf->ntsd,
+				le32_to_cpu(sd_buf->ccontext.DataLength), true);
+			if (rc < 0)
 				goto err_out;
-			}
-
-			inode->i_mode |= fattr.cf_mode & 07777;
-			if (!uid_eq(fattr.cf_uid, INVALID_UID))
-				inode->i_uid = fattr.cf_uid;
-			if (!gid_eq(fattr.cf_gid, INVALID_GID))
-				inode->i_gid = fattr.cf_gid;
-
-			//set acls
-			if (fattr.cf_dacls) {
-				rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
-				if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
-					rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
-			}
-
-			// write xattr nacl
-			if (fattr.nt_acl->type & DACL_PRESENT) {
-			ksmbd_vfs_remove_sd_xattrs(dentry);
-				ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
-						fattr.nt_acl->size + sizeof(struct smb_nt_acl));
-				kfree(fattr.nt_acl);
-				sd_writed = 1;
-			}
-			if (!rc)
-				mark_inode_dirty(inode);
-			posix_acl_release(fattr.cf_acls);
-			posix_acl_release(fattr.cf_dacls);
-			if (rc < 0) {
-				goto err_out;
-			}
+			sd_writed = 1;
 		}
 	}
 
@@ -5798,43 +5744,8 @@ static int smb2_set_info_sec(struct ksmbd_file *fp,
 			     int buf_len)
 {
 	struct smb_ntsd *pntsd = (struct smb_ntsd *)buffer;
-	struct inode *inode = FP_INODE(fp);
-	struct smb_fattr fattr = {0};
-	int rc;
-	struct dentry *dentry = fp->filp->f_path.dentry;
 
-	fattr.cf_uid = INVALID_UID;
-	fattr.cf_gid = INVALID_GID;
-	fattr.cf_mode = inode->i_mode & 0777;
-	rc = parse_sec_desc(pntsd, buf_len, &fattr);
-	if (rc)
-		return rc;
-	inode->i_mode = (inode->i_mode & ~0777) | (fattr.cf_mode & 0777);
-
-	if (!uid_eq(fattr.cf_uid, INVALID_UID))
-		inode->i_uid = fattr.cf_uid;
-	if (!gid_eq(fattr.cf_gid, INVALID_GID))
-		inode->i_gid = fattr.cf_gid;
-
-	//set acls
-	if (fattr.cf_dacls) {
-		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
-		if (S_ISDIR(inode->i_mode) && fattr.cf_dacls)
-			rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, fattr.cf_dacls);
-	}
-
-	// write xattr nacl
-	if (fattr.nt_acl) {
-	ksmbd_vfs_remove_sd_xattrs(dentry);
-		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.nt_acl,
-				fattr.nt_acl->size + sizeof(struct smb_nt_acl));
-		kfree(fattr.nt_acl);
-	}
-	if (!rc)
-		mark_inode_dirty(inode);
-	posix_acl_release(fattr.cf_acls);
-	posix_acl_release(fattr.cf_dacls);
-	return rc;
+	return smb2_set_acl(fp, pntsd, buf_len, false);
 }
 
 /**

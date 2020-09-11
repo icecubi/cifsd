@@ -835,7 +835,7 @@ int parse_sec_desc(struct smb_ntsd *pntsd, int acl_len,
 		return -ENOMEM;
 
 	if (!(le16_to_cpu(pntsd->type) & DACL_PRESENT)) {
-		ksmbd_err("dacl is not present!\n");
+		ksmbd_debug(SMB, "DACL_PRESENT in DACL type is not set\n");
 		return rc;
 	}
 
@@ -1137,4 +1137,81 @@ bool smb_inherit_flags(int flags, bool is_dir)
 	if (flags & CONTAINER_INHERIT_ACE)
 			return true;
 	return false;
+}
+
+int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid)
+{
+	struct smb_nt_acl *nt_acl;
+	int rc = 0;
+	struct smb_sid sid;
+	int granted = (*pdaccess & ~FILE_MAXIMAL_ACCESS_LE);
+	struct smb_ace *ace;
+	int i, found = 0;
+	__le32 access_bits = 0;
+
+	ksmbd_debug(SMB, "check permission using windows acl\n");
+	nt_acl = ksmbd_vfs_get_sd_xattr(dentry);
+	if (!nt_acl)
+		return 0;
+
+	if (!nt_acl->num_aces) {
+		if (nt_acl->size > 0 &&
+		    *pdaccess & ~(FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE)) {
+			rc = -EACCES;
+			goto err_out;
+		}
+		return 0;
+	}
+
+	if (*pdaccess & FILE_MAXIMAL_ACCESS_LE) {
+		for (i = 0; i < nt_acl->num_aces; i++)
+			granted |= nt_acl->ace[i].access_req;
+
+		if (!nt_acl->num_aces)
+			granted = GENERIC_ALL_FLAGS;
+	}
+
+	id_to_sid(uid, SIDOWNER, &sid);
+
+	ace = nt_acl->ace;
+	// check permission of fp dacesss with each ondisk dcal aces
+	for (i = 0; i < nt_acl->num_aces; i++) {
+		if (!compare_sids(&sid, &ace->sid)) {
+			switch (ace->type) {
+			case ACCESS_ALLOWED_ACE_TYPE:
+				access_bits = ace->access_req;
+				break;
+			case ACCESS_DENIED_ACE_TYPE:
+			case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+				access_bits = ~ace->access_req;
+				break;
+			}
+
+			if (granted &
+			    ~(access_bits | FILE_READ_ATTRIBUTES_LE |
+			      FILE_READ_CONTROL_LE)) {
+				ksmbd_debug(SMB, "Access denied with winACL, granted : %x, access_req : %x\n",
+					granted, ace->access_req);
+				rc = -EACCES;
+				goto err_out;
+			}
+
+			found = 1;
+			break;
+		}
+		ace = (struct smb_ace *) ((char *)ace + ace->size);
+	}
+
+	if (!found) {
+		ksmbd_debug(SMB, "Can't find corresponding sid\n");
+		rc = -EACCES;
+		goto err_out;
+	}
+
+	*pdaccess |= granted;
+
+err_out:
+	kfree(nt_acl);
+
+	return rc;
 }
