@@ -462,7 +462,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 
 				/* default acl */
 				default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
-				default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = 0;
+				default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = mode >> 3;
 			} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 				mode = access_flags_to_mode(ppace[i]->access_req,
 						ppace[i]->type);
@@ -470,6 +470,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				fattr->cf_mode &= ~(0007);
 				fattr->cf_mode |= mode;
 				acl_state.other.allow = mode;
+				default_acl_state.other.allow = mode;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
 				goto skip;
 			} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
