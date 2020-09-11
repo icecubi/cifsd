@@ -1149,6 +1149,7 @@ int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid)
 	struct smb_ace *ace;
 	int i, found = 0;
 	__le32 access_bits = 0;
+	struct smb_ace *others_ace = NULL, *check_ace = NULL;
 
 	ksmbd_debug(SMB, "check permission using windows acl\n");
 	nt_acl = ksmbd_vfs_get_sd_xattr(dentry);
@@ -1178,6 +1179,7 @@ int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid)
 	// check permission of fp dacesss with each ondisk dcal aces
 	for (i = 0; i < nt_acl->num_aces; i++) {
 		if (!compare_sids(&sid, &ace->sid)) {
+#if 0
 			switch (ace->type) {
 			case ACCESS_ALLOWED_ACE_TYPE:
 				access_bits = ace->access_req;
@@ -1196,15 +1198,42 @@ int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid)
 				rc = -EACCES;
 				goto err_out;
 			}
-
+#endif
+			check_ace = ace;
 			found = 1;
 			break;
 		}
+		if (!compare_sids(&sid, &sid_everyone))
+			others_ace = ace;
+
 		ace = (struct smb_ace *) ((char *)ace + ace->size);
 	}
 
 	if (!found) {
-		ksmbd_debug(SMB, "Can't find corresponding sid\n");
+		if (others_ace)
+			check_ace = others_ace;
+		else {
+			ksmbd_debug(SMB, "Can't find corresponding sid\n");
+			rc = -EACCES;
+			goto err_out;
+		}
+	}
+
+	switch (check_ace->type) {
+	case ACCESS_ALLOWED_ACE_TYPE:
+	access_bits = check_ace->access_req;
+	break;
+	case ACCESS_DENIED_ACE_TYPE:
+	case ACCESS_DENIED_CALLBACK_ACE_TYPE:
+	access_bits = ~check_ace->access_req;
+	break;
+	}
+
+	if (granted &
+		~(access_bits | FILE_READ_ATTRIBUTES_LE |
+			FILE_READ_CONTROL_LE)) {
+		ksmbd_debug(SMB, "Access denied with winACL, granted : %x, access_req : %x\n",
+				granted, check_ace->access_req);
 		rc = -EACCES;
 		goto err_out;
 	}
