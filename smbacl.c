@@ -466,7 +466,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
 			mode = access_flags_to_mode(ppace[i]->access_req,
 					ppace[i]->type);
-			ksmbd_err("mode : 0x%o\n", mode);
+			ksmbd_err("mode : 0x%o, flags : %x\n", mode, ppace[i]->flags);
 			mode &= 0007;
 			fattr->cf_mode &= ~(0007);
 			fattr->cf_mode |= mode;
@@ -608,8 +608,6 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDCREATOR_GROUP, sid);
-		} else if (pace->e_tag == ACL_OTHER) {
-			smb_copy_sid(sid, &sid_everyone);
 		} else {
 			kfree(sid);
 			continue;
@@ -677,7 +675,49 @@ static void set_default_dacl(struct smb_acl *pndacl, struct smb_fattr *fattr)
 	pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
 	size += pace->size;
 
-	pndacl->num_aces = cpu_to_le32(3);
+	if (S_ISDIR(fattr->cf_mode)) {
+		pace = (struct smb_ace *)((char *)pnndacl + size);
+
+		/* creator owner */
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0x0b;
+		mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req | FILE_DELETE_LE;
+
+		smb_copy_sid(&pace->sid, &creator_owner);
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		size += pace->size;
+		pace = (struct smb_ace *)((char *)pnndacl + size);
+
+		/* creator group */
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0x0b;
+		mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req;
+
+		smb_copy_sid(&pace->sid, &creator_group);
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		size += pace->size;
+		pace = (struct smb_ace *)((char *)pnndacl + size);
+
+		/* other */
+		pace->type = ACCESS_ALLOWED;
+		pace->flags = 0x0b;
+		mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		pace->access_req = access_req;
+		smb_copy_sid(&pace->sid, &sid_everyone);
+		pace->size = 1 + 1 + 2 + 4 + 1 + 1 + 6 + (pace->sid.num_subauth * 4);
+		size += pace->size;
+
+		pndacl->num_aces = cpu_to_le32(6);
+	} else
+		pndacl->num_aces = cpu_to_le32(3);
 	pndacl->size += cpu_to_le16(size);
 }
 
@@ -967,14 +1007,21 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 	struct smb_ace *pace;
 	__u32 access_req;
 	char *pace_base;
+	int num_aces;
        
 	fattr->ntacl = kmalloc(sizeof(struct smb_ntacl) + 3 * sizeof(struct smb_ace),
 			GFP_KERNEL);
 	if (!fattr->ntacl)
 		return -ENOMEM;
-	fattr->ntacl->num_aces = 3;
 
-	pace_base = kmalloc_array(3, sizeof(struct smb_ace),
+	if (S_ISDIR(fattr->cf_mode))
+		num_aces = 6;
+	else
+		num_aces = 3;
+
+	fattr->ntacl->num_aces = num_aces;
+
+	pace_base = kmalloc_array(num_aces, sizeof(struct smb_ace),
 			GFP_KERNEL);
 	if (!pace_base)
 		return -ENOMEM;
@@ -1008,6 +1055,32 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 		access_req = SET_MINIMUM_RIGHTS;
 	smb_set_ace(pace, &sid_everyone, ACCESS_ALLOWED, 0, access_req);
 	fattr->ntacl->size += pace->size;
+
+	if (S_ISDIR(fattr->cf_mode)) {
+		/* creator owner */
+		pace = (struct smb_ace *)((char *)pace + pace->size);
+		mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		smb_set_ace(pace, &creator_owner, ACCESS_ALLOWED, 0x0b, access_req);
+		fattr->ntacl->size += pace->size;
+
+		/* creator group */
+		pace = (struct smb_ace *)((char *)pace + pace->size);
+		mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		smb_set_ace(pace, &creator_group, ACCESS_ALLOWED, 0x0b, access_req);
+		fattr->ntacl->size += pace->size;
+
+		/* other */
+		pace = (struct smb_ace *)((char *)pace + pace->size);
+		mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
+		if (!access_req)
+			access_req = SET_MINIMUM_RIGHTS;
+		smb_set_ace(pace, &sid_everyone, ACCESS_ALLOWED, 0x0b, access_req);
+		fattr->ntacl->size += pace->size;
+	}
 
 	memcpy(fattr->ntacl->ace, pace_base, fattr->ntacl->size);
 	fattr->ntacl->type = SELF_RELATIVE | DACL_PRESENT;
