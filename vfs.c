@@ -1465,7 +1465,7 @@ int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size)
 	return 0;
 }
 
-struct smb_nt_acl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
+struct smb_ntacl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
 {
 	char *attr = NULL, *sd_data = NULL;
 	int rc;
@@ -1479,7 +1479,7 @@ struct smb_nt_acl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
 		memcpy(sd_data, attr, rc);
 	}
 	ksmbd_free(attr);
-	return (struct smb_nt_acl *)sd_data;
+	return (struct smb_ntacl *)sd_data;
 }
 
 /*
@@ -2129,7 +2129,7 @@ int ksmbd_vfs_xattr_sd(char *sd_data, char **xattr_sd, size_t *xattr_sd_size)
 {
 	int sd_size;
 	char *xattr_sd_buf;
-	struct smb_nt_acl *acl = (struct smb_nt_acl *)sd_data;
+	struct smb_ntacl *acl = (struct smb_ntacl *)sd_data;
 
 	sd_size = sizeof(struct smb_ace)*acl->num_aces + 4;
 	*xattr_sd_size = sd_size + XATTR_NAME_SD_LEN + 1;

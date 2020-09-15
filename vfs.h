@@ -252,7 +252,7 @@ void ksmbd_vfs_posix_lock_unblock(struct file_lock *flock);
 int ksmbd_vfs_remove_acl_xattrs(struct dentry *dentry);
 int ksmbd_vfs_remove_sd_xattrs(struct dentry *dentry);
 int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size);
-struct smb_nt_acl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry);
+struct smb_ntacl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry);
 int ksmbd_vfs_set_posix_acl(struct inode *inode, int type,
 		struct posix_acl *acl);
 

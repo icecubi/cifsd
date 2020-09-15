@@ -125,7 +125,7 @@ struct smb_ace {
 	struct smb_sid sid; /* ie UUID of user or group who gets these perms */
 } __packed;
 
-struct smb_nt_acl {
+struct smb_ntacl {
 	int size;
 	int type;
 	int num_aces;
@@ -139,7 +139,7 @@ struct smb_fattr {
 	__le32 daccess;
 	struct posix_acl *cf_acls;
 	struct posix_acl *cf_dacls;
-	struct smb_nt_acl *nt_acl;
+	struct smb_ntacl *ntacl;
 };
 
 struct posix_ace_state {
@@ -183,10 +183,14 @@ int init_acl_state(struct posix_acl_state *state, int cnt);
 void free_acl_state(struct posix_acl_state *state);
 void posix_state_to_acl(struct posix_acl_state *state,
 		struct posix_acl_entry *pace);
-int smb2_set_default_nt_acl(struct smb_fattr *fattr, struct dentry *parent, bool is_dir, struct smb_sid *owner_sid, struct smb_sid *group_sid);
+int smb2_set_default_ntacl(struct smb_fattr *fattr, struct dentry *parent, bool is_dir, struct smb_sid *owner_sid, struct smb_sid *group_sid);
 void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid);
 int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid);
 bool smb_inherit_flags(int flags, bool is_dir);
-int smb_check_perm_win_acl(struct dentry *dentry, __le32 *pdaccess, int uid);
+int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid);
+int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
+		bool is_dir, unsigned int uid, unsigned int gid);
+int smb_set_default_ntacl(struct smb_fattr *fattr);
+int smb_set_default_posix_acl(struct inode *inode);
 
 #endif /* _SMBACL_H */
