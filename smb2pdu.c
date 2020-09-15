@@ -4897,7 +4897,6 @@ static int smb2_get_info_sec(struct ksmbd_work *work,
 	fattr.cf_mode = inode->i_mode;
 	fattr.cf_dacls = NULL;
 
-	// read xattr nacl
 	fattr.cf_acls = get_acl(inode, ACL_TYPE_ACCESS);
 	if (S_ISDIR(inode->i_mode))
 		fattr.cf_dacls = get_acl(inode, ACL_TYPE_DEFAULT);

@@ -350,15 +350,16 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		struct smb_sid *pownersid, struct smb_sid *pgrpsid,
 		struct smb_fattr *fattr)
 {
-	int i, j, ret;
+	int i, ret;
 	int num_aces = 0;
 	int acl_size;
 	char *acl_base;
 	struct smb_ace **ppace;
 	struct posix_acl_entry *cf_pace, *cf_pdace;
 	struct posix_acl_state acl_state, default_acl_state;
-	umode_t mode;
+	umode_t mode = 0, acl_mode;
 	struct smb_ace *ace;
+	bool owner_found = false, group_found = false, others_found = false;
 
 	/* BB need to add parm so we can store the SID BB */
 
@@ -417,61 +418,35 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 				le32_to_cpu(ppace[i]->sid.sub_auth[2]);
 			break;
 		} else if (!compare_sids(&(ppace[i]->sid), pownersid)) {
-			mode = access_flags_to_mode(ppace[i]->access_req,
+			acl_mode = access_flags_to_mode(ppace[i]->access_req,
 					ppace[i]->type);
-			mode &= 0700;
-			fattr->cf_mode &= ~(0700);
-			fattr->cf_mode |= mode;
-
-			/* The owner must be set to at least read-only. */
-			acl_state.owner.allow = (mode >> 6) | 0004;
 			fattr->daccess = ace->access_req;
+			acl_mode &= 0700;
 
-			for (j = 0; j < acl_state.users->n; j++) {
-				if (uid_eq(acl_state.users->aces[j].uid, fattr->cf_uid)) {
-					acl_state.users->aces[j].perms.allow = mode >> 6;
-					goto skip;
-				}
+			if ((fattr->cf_mode & 0700) != acl_mode || !owner_found) {
+				mode &= ~(0700);
+				mode |= acl_mode;
 			}
-
-			acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
-			acl_state.users->aces[acl_state.users->n++].perms.allow = mode >> 6;
-
-			/* default acl */
-			default_acl_state.owner.allow = mode >> 6;
-			default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
-			default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = mode & 0700 >> 6;
+			owner_found = true;
 		} else if (!compare_sids(&(ppace[i]->sid), pgrpsid) ||
 				le32_to_cpu(ppace[i]->sid.sub_auth[ppace[i]->sid.num_subauth - 1]) == 513) {
-			mode = access_flags_to_mode(ppace[i]->access_req,
+			acl_mode = access_flags_to_mode(ppace[i]->access_req,
 					ppace[i]->type);
-			mode &= 0070;
-			fattr->cf_mode &= ~(0070);
-			fattr->cf_mode |= mode;
-			acl_state.group.allow = mode >> 3;
-
-			for (j = 0; j < acl_state.groups->n; j++) {
-				if (gid_eq(acl_state.groups->aces[j].gid, fattr->cf_gid)) {
-					acl_state.groups->aces[j].perms.allow = mode >> 3;
-					goto skip;
-				}
+			acl_mode &= 0070;
+			if ((fattr->cf_mode & 0070) != acl_mode || !group_found) {
+				mode &= ~(0070);
+				mode |= acl_mode;
 			}
-
-			acl_state.groups->aces[acl_state.groups->n].gid = fattr->cf_gid;
-			acl_state.groups->aces[acl_state.groups->n++].perms.allow = mode >> 3;
-
-			/* default acl */
-			default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
-			default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = mode >> 3;
+			group_found = true;
 		} else if (!compare_sids(&(ppace[i]->sid), &sid_everyone)) {
-			mode = access_flags_to_mode(ppace[i]->access_req,
+			acl_mode = access_flags_to_mode(ppace[i]->access_req,
 					ppace[i]->type);
-			ksmbd_err("mode : 0x%o, flags : %x\n", mode, ppace[i]->flags);
-			mode &= 0007;
-			fattr->cf_mode &= ~(0007);
-			fattr->cf_mode |= mode;
-			acl_state.other.allow = mode;
-			default_acl_state.other.allow = mode;
+			acl_mode &= 0007;
+			if ((fattr->cf_mode & 0007) != acl_mode || !others_found) {
+				mode &= ~(0007);
+				mode |= acl_mode;
+			}
+			others_found = true;
 		} else if (!compare_sids(&(ppace[i]->sid), &creator_owner)) {
 			goto skip;
 		} else if (!compare_sids(&(ppace[i]->sid), &creator_group)) {
@@ -481,7 +456,7 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 		} else {
 			struct smb_fattr temp_fattr;
 
-			mode = access_flags_to_mode(ppace[i]->access_req,
+			acl_mode = access_flags_to_mode(ppace[i]->access_req,
 					ppace[i]->type);
 			temp_fattr.cf_uid = INVALID_UID;
 			ret = sid_to_id(&ppace[i]->sid, SIDOWNER, &temp_fattr);
@@ -492,7 +467,8 @@ static void parse_dacl(struct smb_acl *pdacl, char *end_of_acl,
 			} else {
 				fattr->daccess = ace->access_req;
 				acl_state.users->aces[acl_state.users->n].uid = temp_fattr.cf_uid;
-				acl_state.users->aces[acl_state.users->n++].perms.allow = mode >> 6;
+				acl_state.users->aces[acl_state.users->n++].perms.allow = acl_mode & 0700 >> 6;
+				ksmbd_err("user!\n");
 			}
 		}
 
@@ -503,6 +479,37 @@ skip:
 	}
 	kfree(ppace);
 
+	if (owner_found) {
+		fattr->cf_mode &= ~(0700);
+		fattr->cf_mode |= mode & 0700;
+
+		/* The owner must be set to at least read-only. */
+		acl_state.owner.allow = ((mode & 0700) >> 6) | 0004;
+		acl_state.users->aces[acl_state.users->n].uid = fattr->cf_uid;
+		acl_state.users->aces[acl_state.users->n++].perms.allow = (mode & 0700) >> 6;
+		default_acl_state.owner.allow = mode & 0700 >> 6;
+		default_acl_state.users->aces[default_acl_state.users->n].uid = fattr->cf_uid;
+		default_acl_state.users->aces[default_acl_state.users->n++].perms.allow = (mode & 0700) >> 6;
+	}
+
+	if (group_found) {
+		fattr->cf_mode &= ~(0070);
+		fattr->cf_mode |= mode & 0070;
+
+		acl_state.group.allow = (mode & 0070) >> 3;
+		acl_state.groups->aces[acl_state.groups->n].gid = fattr->cf_gid;
+		acl_state.groups->aces[acl_state.groups->n++].perms.allow = (mode & 0070) >> 3;
+		default_acl_state.groups->aces[default_acl_state.groups->n].gid = fattr->cf_gid;
+		default_acl_state.groups->aces[default_acl_state.groups->n++].perms.allow = (mode & 0070) >> 3;
+	}
+
+	if (others_found) {
+		fattr->cf_mode &= ~(0007);
+		fattr->cf_mode |= mode & 0007;
+
+		acl_state.other.allow = mode & 0007;
+		default_acl_state.other.allow = mode & 0007;
+	}
 	if (acl_state.users->n || acl_state.groups->n) {
 		acl_state.mask.allow = 0x07;
 		fattr->cf_acls = posix_acl_alloc(4 + acl_state.users->n + acl_state.groups->n, GFP_KERNEL);
