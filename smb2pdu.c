@@ -2716,7 +2716,8 @@ int smb2_open(struct ksmbd_work *work)
 	daccess = smb_map_generic_desired_access(req->DesiredAccess);
 
 	if (file_present && !(req->CreateOptions & FILE_DELETE_ON_CLOSE_LE)) {
-		rc = smb_check_perm_ntacl(path.dentry, &daccess, sess->user->uid);
+		rc = smb_check_perm_ntacl(path.dentry, &daccess,
+				sess->user->uid);
 		if (rc)
 			goto err_out;
 	}
@@ -2821,7 +2822,8 @@ int smb2_open(struct ksmbd_work *work)
 			if (rc < 0)
 				goto err_out1;
 		} else {
-			ksmbd_debug(SMB, "Set ACLs using SMB2_CREATE_SD_BUFFER context\n");
+			ksmbd_debug(SMB,
+				"Set ACLs using SMB2_CREATE_SD_BUFFER context\n");
 
 			sd_buf = (struct create_sd_buf_req *)context;
 			rc = smb2_set_acl(fp, &sd_buf->ntsd,

@@ -165,7 +165,6 @@ struct posix_ace_state_array {
  * calculated so far: */
 
 struct posix_acl_state {
-	int empty;
 	struct posix_ace_state owner;
 	struct posix_ace_state group;
 	struct posix_ace_state other;
@@ -183,8 +182,6 @@ int init_acl_state(struct posix_acl_state *state, int cnt);
 void free_acl_state(struct posix_acl_state *state);
 void posix_state_to_acl(struct posix_acl_state *state,
 		struct posix_acl_entry *pace);
-int smb2_set_default_ntacl(struct smb_fattr *fattr, struct dentry *parent, bool is_dir, struct smb_sid *owner_sid, struct smb_sid *group_sid);
-void id_to_sid(unsigned int cid, uint sidtype, struct smb_sid *ssid);
 int compare_sids(const struct smb_sid *ctsid, const struct smb_sid *cwsid);
 bool smb_inherit_flags(int flags, bool is_dir);
 int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid);
@@ -192,5 +189,6 @@ int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
 		bool is_dir, unsigned int uid, unsigned int gid);
 int smb_set_default_ntacl(struct smb_fattr *fattr);
 int smb_set_default_posix_acl(struct inode *inode);
+void ksmbd_init_domain(u32 *sub_auth);
 
 #endif /* _SMBACL_H */

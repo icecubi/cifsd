@@ -31,9 +31,7 @@ struct ksmbd_server_config {
 	unsigned long		ipc_last_active;
 	unsigned long		deadtime;
 	unsigned int		share_fake_fscaps;
-
-//	struct smb_sid		domain_sid;
-
+	struct smb_sid		domain_sid;
 	char			*conf[SERVER_CONF_WORK_GROUP + 1];
 };
 
