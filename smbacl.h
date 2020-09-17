@@ -126,6 +126,7 @@ struct smb_ace {
 } __packed;
 
 struct smb_ntacl {
+	unsigned int crc32;
 	int size;
 	int type;
 	int num_aces;

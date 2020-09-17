@@ -18,6 +18,7 @@
 #include <linux/dcache.h>
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
+#include <linux/crc32c.h>
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
 #include <linux/sched/xacct.h>
@@ -1457,8 +1458,10 @@ out:
 int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size)
 {
 	struct dentry *dentry = fp->filp->f_path.dentry;
+	struct smb_ntacl *ntacl = (struct smb_ntacl *)sd_data;
 	int rc;
 
+	ntacl->crc32 = crc32c(0, ntacl->ace, ntacl->size);
 	rc = ksmbd_vfs_setxattr(dentry, XATTR_NAME_SD, sd_data, size, 0);
 	if (rc < 0)
 		ksmbd_err("Failed to store XATTR sd :%d\n", rc);
@@ -1467,6 +1470,7 @@ int ksmbd_vfs_set_sd_xattr(struct ksmbd_file *fp, char *sd_data, int size)
 
 struct smb_ntacl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
 {
+	struct smb_ntacl *ntacl = NULL;
 	char *attr = NULL, *sd_data = NULL;
 	int rc;
 
@@ -1477,9 +1481,16 @@ struct smb_ntacl *ksmbd_vfs_get_sd_xattr(struct dentry *dentry)
 			return NULL;
 
 		memcpy(sd_data, attr, rc);
+		ntacl = (struct smb_ntacl *)sd_data;
+		if (ntacl->crc32 != crc32c(0, ntacl->ace, ntacl->size)) {
+			ksmbd_vfs_remove_sd_xattrs(dentry);
+			kfree(sd_data);
+			ntacl = NULL;
+		}
 	}
 	ksmbd_free(attr);
-	return (struct smb_ntacl *)sd_data;
+
+	return ntacl;
 }
 
 /*

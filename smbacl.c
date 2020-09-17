@@ -1019,7 +1019,6 @@ int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
 		if (pntacl->type & DACL_AUTO_INHERITED)
 			fattr->ntacl->type |= DACL_AUTO_INHERITED;
 		fattr->ntacl->size = nt_size;
-
 		memcpy(fattr->ntacl->ace, aces_base, nt_size);
 		rc = 0;
 	}
