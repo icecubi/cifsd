@@ -1246,7 +1246,7 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 	}
 
 	if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE |
-		FILE_READ_CONTROL_LE)) {
+		FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE)) {
 		ksmbd_debug(SMB, "Access denied with winACL, granted : %x, access_req : %x\n",
 				granted, ace->access_req);
 		rc = -EACCES;
