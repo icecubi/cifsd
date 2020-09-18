@@ -1240,15 +1240,15 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 
 	posix_acls = get_acl(dentry->d_inode, ACL_TYPE_ACCESS);
 	if (posix_acls && !found) {
-		unsigned int id;
+		unsigned int id = -1;
 
 		pa_entry = posix_acls->a_entries;
 		for (i = 0; i < posix_acls->a_count; i++, pa_entry++) {
-			if (pa_entry->e_tag == ACL_USER) {
+			if (pa_entry->e_tag == ACL_USER)
 				id = from_kuid(&init_user_ns, pa_entry->e_uid);
-			} else if (pa_entry->e_tag == ACL_GROUP) {
+			else if (pa_entry->e_tag == ACL_GROUP)
 				id = from_kgid(&init_user_ns, pa_entry->e_gid);
-			} else
+			else
 				continue;
 
 			if (id == uid) {

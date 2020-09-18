@@ -1415,7 +1415,10 @@ int ksmbd_vfs_remove_acl_xattrs(struct dentry *dentry)
 			name += strlen(name) + 1) {
 		ksmbd_debug(SMB, "%s, len %zd\n", name, strlen(name));
 
-		if (!strncmp(name, XATTR_NAME_POSIX_ACL_DEFAULT, sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)-1)) {
+		if (!strncmp(name, XATTR_NAME_POSIX_ACL_ACCESS,
+			     sizeof(XATTR_NAME_POSIX_ACL_ACCESS)-1) ||
+		    !strncmp(name, XATTR_NAME_POSIX_ACL_DEFAULT,
+			     sizeof(XATTR_NAME_POSIX_ACL_DEFAULT)-1)) {
 			err = ksmbd_vfs_remove_xattr(dentry, name);
 			if (err)
 				ksmbd_debug(SMB, "remove xattr failed : %s\n", name);

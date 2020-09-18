@@ -2313,6 +2313,7 @@ static int smb2_set_acl(struct ksmbd_file *fp, struct smb_ntsd *pntsd, int ntsd_
 		inode->i_gid = fattr.cf_gid;
 	mark_inode_dirty(inode);
 
+	ksmbd_vfs_remove_acl_xattrs(dentry);
 	/* Update posix acls */
 	if (fattr.cf_dacls) {
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, fattr.cf_acls);
