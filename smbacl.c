@@ -60,6 +60,25 @@ static const struct smb_sid sid_unix_NFS_mode = { 1, 2, {0, 0, 0, 0, 0, 5},
 	{cpu_to_le32(88),
 	 cpu_to_le32(3), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0} };
 
+static void dump_sid(struct smb_sid *psid)
+{
+	if (psid->num_subauth) {
+		int i;
+		ksmbd_err("SID revision %d num_auth %d\n",
+				psid->revision, psid->num_subauth);
+
+		for (i = 0; i < psid->num_subauth; i++) {
+			ksmbd_err("SID sub_auth[%d]: 0x%x\n",
+					i, le32_to_cpu(psid->sub_auth[i]));
+		}
+
+		/* BB add length check to make sure that we do not have huge
+		 *                         num auths and therefore go off the end */
+		ksmbd_err("RID 0x%x\n",
+				le32_to_cpu(psid->sub_auth[psid->num_subauth-1]));
+	}
+}
+
 /*
  * if the two SIDs (roughly equivalent to a UUID for a user or group) are
  * the same returns zero, if they do not match returns non-zero.
@@ -561,7 +580,6 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
 
 	if (fattr->ntacl->num_aces) {
-
 		ntace = fattr->ntacl->ace;
 		for (i = 0; i < fattr->ntacl->num_aces; i++) {
 			memcpy((char *)pnndacl + size, ntace, ntace->size);
@@ -569,7 +587,6 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			ntace = (struct smb_ace *)((char *)ntace + ntace->size);
 			num_aces++;
 		}
-		goto out;
 	}
 
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
@@ -581,7 +598,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 		if (!sid)
 			break;
 
-		if (pace->e_tag == ACL_USER ) {
+		if (pace->e_tag == ACL_USER) {
 			uid_t uid;
 
 			uid = from_kuid(&init_user_ns, pace->e_uid);

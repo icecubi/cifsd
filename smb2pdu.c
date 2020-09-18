@@ -2840,8 +2840,6 @@ int smb2_open(struct ksmbd_work *work)
 		struct smb_fattr fattr = {0};
 		struct inode *inode = FP_INODE(fp);
 
-		smb_set_default_posix_acl(inode);
-
 		fattr.cf_uid = inode->i_uid;
 		fattr.cf_gid = inode->i_gid;
 		fattr.cf_mode = inode->i_mode;
@@ -2849,8 +2847,10 @@ int smb2_open(struct ksmbd_work *work)
 		rc = smb_inherit_acls(&fattr, path.dentry->d_parent,
 			S_ISDIR(inode->i_mode), sess->user->uid,
 			sess->user->gid);
-		if (rc < 0)
+		if (rc < 0) {
+			smb_set_default_posix_acl(inode);
 			smb_set_default_ntacl(&fattr);
+		}
 		rc = 0;
 
 		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.ntacl,
