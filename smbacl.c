@@ -569,6 +569,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			ntace = (struct smb_ace *)((char *)ntace + ntace->size);
 			num_aces++;
 		}
+		goto out;
 	}
 
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
@@ -580,17 +581,17 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 		if (!sid)
 			break;
 
-		if (pace->e_tag == ACL_USER) {
+		if (pace->e_tag == ACL_USER ) {
 			uid_t uid;
 
 			uid = from_kuid(&init_user_ns, pace->e_uid);
 			id_to_sid(uid, SIDOWNER, sid);
-		} else if (pace->e_tag == ACL_GROUP) {
+		} else if (pace->e_tag == ACL_GROUP && !fattr->ntacl->num_aces) {
 			gid_t gid;
 
 			gid = from_kgid(&init_user_ns, pace->e_gid);
 			id_to_sid(gid, SIDGROUP, sid);
-		} else if (pace->e_tag == ACL_OTHER) {
+		} else if (pace->e_tag == ACL_OTHER && !fattr->ntacl->num_aces) {
 			smb_copy_sid(sid, &sid_everyone);
 		} else {
 			kfree(sid);
@@ -616,6 +617,9 @@ pass_same_sid:
 		kfree(sid);
 	}
 
+	if (fattr->ntacl->num_aces)
+		goto out;
+
 	if (!fattr->cf_dacls || IS_ERR(fattr->cf_dacls))
 		goto out;
 
@@ -640,6 +644,7 @@ pass_same_sid:
 			kfree(sid);
 			continue;
 		}
+
 		size += fill_ace_for_sid(
 			(struct smb_ace *) ((char *)pnndacl + size),
 				sid, flags, pace->e_perm, 0777);
@@ -1187,6 +1192,7 @@ bool smb_inherit_flags(int flags, bool is_dir)
 int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 {
 	struct smb_ntacl *ntacl;
+	struct posix_acl *posix_acls;
 	int rc = 0;
 	struct smb_sid sid;
 	int granted = (*pdaccess & ~FILE_MAXIMAL_ACCESS_LE);
@@ -1194,6 +1200,7 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 	int i, found = 0;
 	__le32 access_bits = 0;
 	struct smb_ace *others_ace = NULL;
+	struct posix_acl_entry *pa_entry;
 
 	ksmbd_debug(SMB, "check permission using windows acl\n");
 	ntacl = ksmbd_vfs_get_sd_xattr(dentry);
@@ -1231,6 +1238,28 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 		ace = (struct smb_ace *) ((char *)ace + ace->size);
 	}
 
+	posix_acls = get_acl(dentry->d_inode, ACL_TYPE_ACCESS);
+	if (posix_acls && !found) {
+		unsigned int id;
+
+		pa_entry = posix_acls->a_entries;
+		for (i = 0; i < posix_acls->a_count; i++, pa_entry++) {
+			if (pa_entry->e_tag == ACL_USER) {
+				id = from_kuid(&init_user_ns, pa_entry->e_uid);
+			} else if (pa_entry->e_tag == ACL_GROUP) {
+				id = from_kgid(&init_user_ns, pa_entry->e_gid);
+			} else
+				continue;
+
+			if (id == uid) {
+				mode_to_access_flags(pa_entry->e_perm, 0777, &access_bits);
+				if (!access_bits)
+					access_bits = SET_MINIMUM_RIGHTS;
+				goto check_access_bits;
+			}
+		}
+	}
+
 	if (!found) {
 		if (others_ace)
 			ace = others_ace;
@@ -1251,6 +1280,7 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 		break;
 	}
 
+check_access_bits:
 	if (granted & ~(access_bits | FILE_READ_ATTRIBUTES_LE |
 		FILE_READ_CONTROL_LE | FILE_WRITE_DAC_LE)) {
 		ksmbd_debug(SMB, "Access denied with winACL, granted : %x, access_req : %x\n",
