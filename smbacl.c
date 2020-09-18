@@ -992,7 +992,7 @@ int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
 	for (i = 0; i < pntacl->num_aces; i++) {
 		flags = paces->flags;
 		if (!smb_inherit_flags(paces->flags, is_dir))
-			continue;
+			goto pass;
 		if (is_dir) {
 			flags &= ~(INHERIT_ONLY_ACE | INHERITED_ACE);
 			if (!(flags & CONTAINER_INHERIT_ACE))
@@ -1034,6 +1034,7 @@ int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
 		nt_size += aces->size;
 		aces = (struct smb_ace *)((char *)aces + aces->size);
 		ace_cnt++;
+pass:
 		paces = (struct smb_ace *)((char *)paces + paces->size);
 	}
 
@@ -1120,7 +1121,7 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 		mode_to_access_flags(fattr->cf_mode, 0700, &access_req);
 		if (!access_req)
 			access_req = SET_MINIMUM_RIGHTS;
-		smb_set_ace(pace, &creator_owner, ACCESS_ALLOWED, 0x0b,
+		smb_set_ace(pace, &creator_owner, ACCESS_ALLOWED, 0x03,
 				access_req);
 		fattr->ntacl->size += pace->size;
 
@@ -1129,7 +1130,7 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 		mode_to_access_flags(fattr->cf_mode, 0070, &access_req);
 		if (!access_req)
 			access_req = SET_MINIMUM_RIGHTS;
-		smb_set_ace(pace, &creator_group, ACCESS_ALLOWED, 0x0b,
+		smb_set_ace(pace, &creator_group, ACCESS_ALLOWED, 0x03,
 				access_req);
 		fattr->ntacl->size += pace->size;
 
@@ -1138,7 +1139,7 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 		mode_to_access_flags(fattr->cf_mode, 0007, &access_req);
 		if (!access_req)
 			access_req = SET_MINIMUM_RIGHTS;
-		smb_set_ace(pace, &sid_everyone, ACCESS_ALLOWED, 0x0b,
+		smb_set_ace(pace, &sid_everyone, ACCESS_ALLOWED, 0x03,
 				access_req);
 		fattr->ntacl->size += pace->size;
 	}
@@ -1178,10 +1179,6 @@ int smb_set_default_posix_acl(struct inode *inode)
 		ksmbd_err("Set posix acl(ACL_TYPE_ACCESS) failed, rc : %d\n",
 				rc);
 	else if (S_ISDIR(inode->i_mode)) {
-		acl_state.group.allow = 0;
-		acl_state.other.allow = 0;
-		acl_state.users->aces[0].perms.allow = 0;
-		acl_state.groups->aces[0].perms.allow = 0;
 		posix_state_to_acl(&acl_state, acls->a_entries);
 		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, acls);
 		if (rc < 0)
