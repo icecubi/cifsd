@@ -555,23 +555,20 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 	struct smb_acl *pnndacl;
 	struct posix_acl_entry *pace;
 	struct smb_sid *sid;
-	int i;
-	int flags = 0;
+	struct smb_ace *ntace;
+	int i, j, flags = 0;
 
 	pnndacl = (struct smb_acl *)((char *)pndacl + sizeof(struct smb_acl));
 
 	if (fattr->ntacl->num_aces) {
-		struct smb_ace *ace;
 
-		ace = fattr->ntacl->ace;
+		ntace = fattr->ntacl->ace;
 		for (i = 0; i < fattr->ntacl->num_aces; i++) {
-			memcpy((char *)pnndacl + size, ace, ace->size);
-			size += ace->size;
-			ace = (struct smb_ace *)((char *)ace + ace->size);
+			memcpy((char *)pnndacl + size, ntace, ntace->size);
+			size += ntace->size;
+			ntace = (struct smb_ace *)((char *)ntace + ntace->size);
 			num_aces++;
 		}
-
-		goto out;
 	}
 
 	if (!fattr->cf_acls || IS_ERR(fattr->cf_acls))
@@ -600,6 +597,14 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			continue;
 		}
 
+		ntace = fattr->ntacl->ace;
+		for (j = 0; j < fattr->ntacl->num_aces; j++) {
+			if (!compare_sids((const struct smb_sid *)sid, &ntace->sid))
+				goto pass_same_sid;
+
+			ntace = (struct smb_ace *)((char *)ntace + ntace->size);
+		}
+
 		if (fattr->cf_dacls)
 			flags = 0x03;
 
@@ -607,6 +612,7 @@ static void set_dacl(struct smb_acl *pndacl, const struct smb_sid *pownersid,
 			(struct smb_ace *) ((char *)pnndacl + size),
 				sid, flags, pace->e_perm, 0777);
 		num_aces++;
+pass_same_sid:
 		kfree(sid);
 	}
 
@@ -1266,6 +1272,5 @@ void ksmbd_init_domain(u32 *sub_auth)
 	memcpy(&server_conf.domain_sid, &domain, sizeof(struct smb_sid));
 	for (i = 0; i < 3; ++i) {
 		server_conf.domain_sid.sub_auth[i] = sub_auth[i];
-		ksmbd_err("subauth : %d\n", sub_auth[i]);
 	}
 }
