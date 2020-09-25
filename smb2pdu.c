@@ -2847,12 +2847,13 @@ int smb2_open(struct ksmbd_work *work)
 		rc = smb_inherit_acls(&fattr, path.dentry->d_parent,
 			S_ISDIR(inode->i_mode), sess->user->uid,
 			sess->user->gid);
-		if (rc < 0) {
-			smb_set_default_posix_acl(inode);
+		if (rc)
 			smb_set_default_ntacl(&fattr);
-		} else
-			smb_inherit_posix_acl(inode,
-					path.dentry->d_parent->d_inode);
+
+		rc = smb_inherit_posix_acl(inode,
+				path.dentry->d_parent->d_inode);
+		if (rc)
+			smb_set_default_posix_acl(inode);
 		rc = 0;
 
 		ksmbd_vfs_set_sd_xattr(fp, (char *)fattr.ntacl,

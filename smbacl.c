@@ -1149,13 +1149,15 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 	return 0;
 }
 
-void smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode)
+int smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode)
 {
 	struct posix_acl *acls;
 	struct posix_acl_entry *pace;
 	int rc, i;
 
 	acls = get_acl(parent_inode, ACL_TYPE_DEFAULT);
+	if (!acls)
+		return -ENOENT;
 	pace = acls->a_entries;
 
 	for (i = 0; i < acls->a_count; i++, pace++) {
@@ -1176,6 +1178,7 @@ void smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode)
 					rc);
 	}
 	posix_acl_release(acls);
+	return rc;
 }
 
 int smb_set_default_posix_acl(struct inode *inode)

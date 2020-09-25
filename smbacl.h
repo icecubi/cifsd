@@ -190,7 +190,7 @@ int smb_inherit_acls(struct smb_fattr *fattr, struct dentry *parent,
 		bool is_dir, unsigned int uid, unsigned int gid);
 int smb_set_default_ntacl(struct smb_fattr *fattr);
 int smb_set_default_posix_acl(struct inode *inode);
-void smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode);
+int smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode);
 void ksmbd_init_domain(u32 *sub_auth);
 
 #endif /* _SMBACL_H */
