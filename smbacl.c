@@ -1149,6 +1149,35 @@ int smb_set_default_ntacl(struct smb_fattr *fattr)
 	return 0;
 }
 
+void smb_inherit_posix_acl(struct inode *inode, struct inode *parent_inode)
+{
+	struct posix_acl *acls;
+	struct posix_acl_entry *pace;
+	int rc, i;
+
+	acls = get_acl(parent_inode, ACL_TYPE_DEFAULT);
+	pace = acls->a_entries;
+
+	for (i = 0; i < acls->a_count; i++, pace++) {
+		if (pace->e_tag == ACL_MASK) {
+			pace->e_perm = 0x07;
+			break;
+		}
+	}
+
+	rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_ACCESS, acls);
+	if (rc < 0)
+		ksmbd_err("Set posix acl(ACL_TYPE_ACCESS) failed, rc : %d\n",
+				rc);
+	else if (S_ISDIR(inode->i_mode)) {
+		rc = ksmbd_vfs_set_posix_acl(inode, ACL_TYPE_DEFAULT, acls);
+		if (rc < 0)
+			ksmbd_err("Set posix acl(ACL_TYPE_DEFAULT) failed, rc : %d\n",
+					rc);
+	}
+	posix_acl_release(acls);
+}
+
 int smb_set_default_posix_acl(struct inode *inode)
 {
 	struct posix_acl_state acl_state;
