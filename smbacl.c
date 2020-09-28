@@ -1274,7 +1274,8 @@ int smb_check_perm_ntacl(struct dentry *dentry, __le32 *pdaccess, int uid)
 
 	ace = ntacl->ace;
 	for (i = 0; i < ntacl->num_aces; i++) {
-		if (!compare_sids(&sid, &ace->sid)) {
+		if (!compare_sids(&sid, &ace->sid) ||
+		    !compare_sids(&sid_unix_NFS_mode, &ace->sid)) {
 			found = 1;
 			break;
 		}
