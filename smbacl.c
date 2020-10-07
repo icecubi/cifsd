@@ -904,7 +904,6 @@ int build_sec_desc(struct smb_ntsd *pntsd, int addition_info, __u32 *secdesclen,
 
 	offset = sizeof(struct smb_ntsd);
 	pntsd->sacloffset = 0;
-	pntsd->type = ACCESS_ALLOWED;
 	pntsd->revision = cpu_to_le16(1);
 	pntsd->type = SELF_RELATIVE;
 	if (fattr->ntacl)
